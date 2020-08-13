@@ -1,5 +1,5 @@
 import * as React from 'react'
-import * as classNames from 'classnames'
+import classNames from 'classnames'
 import {
   AutocompletingTextArea,
   AutocompletingInput,
@@ -9,12 +9,13 @@ import {
 import { CommitIdentity } from '../../models/commit-identity'
 import { ICommitMessage } from '../../models/commit-message'
 import { Dispatcher } from '../dispatcher'
-import { IGitHubUser } from '../../lib/databases/github-user-database'
-import { Repository } from '../../models/repository'
+import {
+  Repository,
+  isRepositoryWithGitHubRepository,
+} from '../../models/repository'
 import { Button } from '../lib/button'
 import { Avatar } from '../lib/avatar'
 import { Loading } from '../lib/loading'
-import { generateGravatarUrl } from '../../lib/gravatar'
 import { AuthorInput } from '../lib/author-input'
 import { FocusContainer } from '../lib/focus-container'
 import { showContextualMenu } from '../main-process-proxy'
@@ -24,9 +25,9 @@ import { IMenuItem } from '../../lib/menu-item'
 import { ICommitContext } from '../../models/commit'
 import { startTimer } from '../lib/timing'
 import { PermissionsCommitWarning } from './permissions-commit-warning'
-import { enableBranchProtectionWarningFlow } from '../../lib/feature-flag'
 import { LinkButton } from '../lib/link-button'
 import { FoldoutType } from '../../lib/app-state'
+import { IAvatarUser, getAvatarUserFromAuthor } from '../../models/avatar'
 
 const addAuthorIcon = new OcticonSymbol(
   12,
@@ -41,7 +42,6 @@ interface ICommitMessageProps {
   readonly onCreateCommit: (context: ICommitContext) => Promise<boolean>
   readonly branch: string | null
   readonly commitAuthor: CommitIdentity | null
-  readonly gitHubUser: IGitHubUser | null
   readonly anyFilesSelected: boolean
   readonly focusCommitMessage: boolean
   readonly commitMessage: ICommitMessage | null
@@ -51,8 +51,8 @@ interface ICommitMessageProps {
   readonly isCommitting: boolean
   readonly placeholder: string
   readonly prepopulateCommitSummary: boolean
-  readonly currentBranchProtected: boolean
-  readonly hasWritePermissionForRepository: boolean
+  readonly showBranchProtected: boolean
+  readonly showNoWriteAccess: boolean
 
   /**
    * Whether or not to show a field for adding co-authors to
@@ -256,23 +256,15 @@ export class CommitMessage extends React.Component<
   }
 
   private renderAvatar() {
-    const commitAuthor = this.props.commitAuthor
+    const { commitAuthor, repository } = this.props
+    const { gitHubRepository } = repository
     const avatarTitle = commitAuthor
       ? `Committing as ${commitAuthor.name} <${commitAuthor.email}>`
       : undefined
-    let avatarUser = undefined
-
-    if (commitAuthor) {
-      const avatarURL = this.props.gitHubUser
-        ? this.props.gitHubUser.avatarURL
-        : generateGravatarUrl(commitAuthor.email)
-
-      avatarUser = {
-        email: commitAuthor.email,
-        name: commitAuthor.name,
-        avatarURL,
-      }
-    }
+    const avatarUser: IAvatarUser | undefined =
+      commitAuthor !== null
+        ? getAvatarUserFromAuthor(commitAuthor, gitHubRepository)
+        : undefined
 
     return <Avatar user={avatarUser} title={avatarTitle} />
   }
@@ -450,25 +442,31 @@ export class CommitMessage extends React.Component<
     return <div className={className}>{this.renderCoAuthorToggleButton()}</div>
   }
 
-  private renderPermissionsCommitWarning = (branch: string) => {
-    if (!enableBranchProtectionWarningFlow()) {
-      return null
-    }
-
+  private renderPermissionsCommitWarning() {
     const {
-      currentBranchProtected,
-      hasWritePermissionForRepository,
+      showBranchProtected,
+      showNoWriteAccess,
       repository,
+      branch,
     } = this.props
 
-    if (!hasWritePermissionForRepository) {
+    if (showNoWriteAccess) {
       return (
         <PermissionsCommitWarning>
-          You do not have permission to push to{' '}
-          <strong>{repository.name}</strong>.
+          You don't have write access to <strong>{repository.name}</strong>.
+          Want to{' '}
+          <LinkButton onClick={this.onMakeFork}>create a fork</LinkButton>?
         </PermissionsCommitWarning>
       )
-    } else if (currentBranchProtected) {
+    } else if (showBranchProtected) {
+      if (branch === null) {
+        // If the branch is null that means we haven't loaded the tip yet or
+        // we're on a detached head. We shouldn't ever end up here with
+        // showBranchProtected being true without a branch but who knows
+        // what fun and exiting edge cases the future might hold
+        return null
+      }
+
       return (
         <PermissionsCommitWarning>
           <strong>{branch}</strong> is a protected branch. Want to{' '}
@@ -487,9 +485,13 @@ export class CommitMessage extends React.Component<
     })
   }
 
-  public render() {
-    const branchName = this.props.branch ? this.props.branch : 'master'
+  private onMakeFork = () => {
+    if (isRepositoryWithGitHubRepository(this.props.repository)) {
+      this.props.dispatcher.showCreateForkDialog(this.props.repository)
+    }
+  }
 
+  public render() {
     const isSummaryWhiteSpace = this.state.summary.match(/^\s+$/g)
     const buttonEnabled =
       this.canCommit() && !this.props.isCommitting && !isSummaryWhiteSpace
@@ -507,6 +509,19 @@ export class CommitMessage extends React.Component<
     const summaryInputClassName = classNames('summary-field', 'nudge-arrow', {
       'nudge-arrow-left': this.props.shouldNudge,
     })
+
+    const branchName = this.props.branch
+    const commitVerb = loading ? 'Committing' : 'Commit'
+    const commitTitle =
+      branchName !== null ? `${commitVerb} to ${branchName}` : commitVerb
+    const commitButtonContents =
+      branchName !== null ? (
+        <>
+          {commitVerb} to <strong>{branchName}</strong>
+        </>
+      ) : (
+        commitVerb
+      )
 
     return (
       <div
@@ -553,7 +568,7 @@ export class CommitMessage extends React.Component<
 
         {this.renderCoAuthorInput()}
 
-        {this.renderPermissionsCommitWarning(branchName)}
+        {this.renderPermissionsCommitWarning()}
 
         <Button
           type="submit"
@@ -562,9 +577,7 @@ export class CommitMessage extends React.Component<
           disabled={!buttonEnabled}
         >
           {loading}
-          <span title={`Commit to ${branchName}`}>
-            {loading ? 'Committing' : 'Commit'} to <strong>{branchName}</strong>
-          </span>
+          <span title={commitTitle}>{commitButtonContents}</span>
         </Button>
       </div>
     )
