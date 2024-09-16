@@ -1,13 +1,16 @@
 import { git, gitNetworkArguments, IGitExecutionOptions } from './core'
-import { envForAuthentication } from './authentication'
 
 import { Repository } from '../../models/repository'
 import { Commit } from '../../models/commit'
 import { IRevertProgress } from '../../models/progress'
-import { IGitAccount } from '../../models/git-account'
 
 import { executionOptionsWithProgress } from '../progress/from-process'
 import { RevertProgressParser } from '../progress/revert'
+import {
+  envForRemoteOperation,
+  getFallbackUrlForProxyResolve,
+} from './environment'
+import { IRemote } from '../../models/remote'
 
 /**
  * Creates a new commit that reverts the changes of a previous commit
@@ -15,17 +18,14 @@ import { RevertProgressParser } from '../progress/revert'
  * @param repository  - The repository to update
  *
  * @param commit         - The SHA of the commit to be reverted
- *
  */
 export async function revertCommit(
   repository: Repository,
   commit: Commit,
-  account: IGitAccount | null,
+  currentRemote: IRemote | null,
   progressCallback?: (progress: IRevertProgress) => void
 ) {
-  const networkArguments = await gitNetworkArguments(repository, account)
-
-  const args = [...networkArguments, 'revert']
+  const args = [...gitNetworkArguments(), 'revert']
   if (commit.parentSHAs.length > 1) {
     args.push('-m', '1')
   }
@@ -34,7 +34,9 @@ export async function revertCommit(
 
   let opts: IGitExecutionOptions = {}
   if (progressCallback) {
-    const env = envForAuthentication(account)
+    const env = await envForRemoteOperation(
+      getFallbackUrlForProxyResolve(repository, currentRemote)
+    )
     opts = await executionOptionsWithProgress(
       { env, trackLFSProgress: true },
       new RevertProgressParser(),

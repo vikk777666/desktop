@@ -3,8 +3,6 @@ import * as React from 'react'
 import { assertNever } from '../../lib/fatal-error'
 import { encodePathAsUrl } from '../../lib/path'
 
-import { Dispatcher } from '../dispatcher'
-
 import { Repository } from '../../models/repository'
 import {
   CommittedFileChange,
@@ -21,6 +19,7 @@ import {
   ITextDiff,
   ILargeTextDiff,
   ImageDiffType,
+  ISubmoduleDiff,
 } from '../../models/diff'
 import { Button } from '../lib/button'
 import {
@@ -29,7 +28,9 @@ import {
   DeletedImageDiff,
 } from './image-diffs'
 import { BinaryFile } from './binary-file'
-import { TextDiff } from './text-diff'
+import { SideBySideDiff } from './side-by-side-diff'
+import { IFileContents } from './syntax-highlighting'
+import { SubmoduleDiff } from './submodule-diff'
 
 // image used when no diff is displayed
 const NoDiffImage = encodePathAsUrl(__dirname, 'static/ufo-alert.svg')
@@ -56,14 +57,52 @@ interface IDiffProps {
   /** The diff that should be rendered */
   readonly diff: IDiff
 
-  /** propagate errors up to the main application */
-  readonly dispatcher: Dispatcher
+  /**
+   * Contents of the old and new files related to the current text diff.
+   */
+  readonly fileContents: IFileContents | null
 
   /** The type of image diff to display. */
   readonly imageDiffType: ImageDiffType
 
   /** Hiding whitespace in diff. */
   readonly hideWhitespaceInDiff: boolean
+
+  /** Whether we should display side by side diffs. */
+  readonly showSideBySideDiff: boolean
+
+  /** Whether we should show a confirmation dialog when the user discards changes */
+  readonly askForConfirmationOnDiscardChanges?: boolean
+
+  /** Whether or not to show the diff check marks indicating inclusion in a commit */
+  readonly showDiffCheckMarks: boolean
+
+  /**
+   * Called when the user requests to open a binary file in an the
+   * system-assigned application for said file type.
+   */
+  readonly onOpenBinaryFile: (fullPath: string) => void
+
+  /** Called when the user requests to open a submodule. */
+  readonly onOpenSubmodule?: (fullPath: string) => void
+
+  /**
+   * Called when the user is viewing an image diff and requests
+   * to change the diff presentation mode.
+   */
+  readonly onChangeImageDiffType: (type: ImageDiffType) => void
+
+  /*
+   * Called when the user wants to discard a selection of the diff.
+   * Only applicable when readOnly is false.
+   */
+  readonly onDiscardChanges?: (
+    diff: ITextDiff,
+    diffSelection: DiffSelection
+  ) => void
+
+  /** Called when the user changes the hide whitespace in diffs setting. */
+  readonly onHideWhitespaceInDiffChanged: (checked: boolean) => void
 }
 
 interface IDiffState {
@@ -88,6 +127,8 @@ export class Diff extends React.Component<IDiffProps, IDiffState> {
         return this.renderText(diff)
       case DiffType.Binary:
         return this.renderBinaryFile()
+      case DiffType.Submodule:
+        return this.renderSubmoduleDiff(diff)
       case DiffType.Image:
         return this.renderImage(diff)
       case DiffType.LargeText: {
@@ -102,15 +143,11 @@ export class Diff extends React.Component<IDiffProps, IDiffState> {
     }
   }
 
-  private onChangeImageDiffType = (type: ImageDiffType) => {
-    this.props.dispatcher.changeImageDiffType(type)
-  }
-
   private renderImage(imageDiff: IImageDiff) {
     if (imageDiff.current && imageDiff.previous) {
       return (
         <ModifiedImageDiff
-          onChangeDiffType={this.onChangeImageDiffType}
+          onChangeDiffType={this.props.onChangeImageDiffType}
           diffType={this.props.imageDiffType}
           current={imageDiff.current}
           previous={imageDiff.previous}
@@ -139,13 +176,14 @@ export class Diff extends React.Component<IDiffProps, IDiffState> {
   private renderLargeTextDiff() {
     return (
       <div className="panel empty large-diff">
-        <img src={NoDiffImage} className="blankslate-image" />
-        <p>
-          The diff is too large to be displayed by default.
-          <br />
-          You can try to show it anyway, but performance may be negatively
-          impacted.
-        </p>
+        <img src={NoDiffImage} className="blankslate-image" alt="" />
+        <div className="description">
+          <p>The diff is too large to be displayed by default.</p>
+          <p>
+            You can try to show it anyway, but performance may be negatively
+            impacted.
+          </p>
+        </div>
         <Button onClick={this.showLargeDiff}>
           {__DARWIN__ ? 'Show Diff' : 'Show diff'}
         </Button>
@@ -156,7 +194,7 @@ export class Diff extends React.Component<IDiffProps, IDiffState> {
   private renderUnrenderableDiff() {
     return (
       <div className="panel empty large-diff">
-        <img src={NoDiffImage} />
+        <img src={NoDiffImage} alt="" />
         <p>The diff is too large to be displayed.</p>
       </div>
     )
@@ -169,6 +207,8 @@ export class Diff extends React.Component<IDiffProps, IDiffState> {
       hunks: diff.hunks,
       kind: DiffType.Text,
       lineEndingsChange: diff.lineEndingsChange,
+      maxLineNumber: diff.maxLineNumber,
+      hasHiddenBidiChars: diff.hasHiddenBidiChars,
     }
 
     return this.renderTextDiff(textDiff)
@@ -212,25 +252,41 @@ export class Diff extends React.Component<IDiffProps, IDiffState> {
     return this.renderTextDiff(diff)
   }
 
+  private renderSubmoduleDiff(diff: ISubmoduleDiff) {
+    return (
+      <SubmoduleDiff
+        onOpenSubmodule={this.props.onOpenSubmodule}
+        diff={diff}
+        readOnly={this.props.readOnly}
+      />
+    )
+  }
+
   private renderBinaryFile() {
     return (
       <BinaryFile
         path={this.props.file.path}
         repository={this.props.repository}
-        dispatcher={this.props.dispatcher}
+        onOpenBinaryFile={this.props.onOpenBinaryFile}
       />
     )
   }
 
   private renderTextDiff(diff: ITextDiff) {
     return (
-      <TextDiff
-        repository={this.props.repository}
+      <SideBySideDiff
         file={this.props.file}
-        readOnly={this.props.readOnly}
+        diff={diff}
+        fileContents={this.props.fileContents}
+        hideWhitespaceInDiff={this.props.hideWhitespaceInDiff}
+        showSideBySideDiff={this.props.showSideBySideDiff}
         onIncludeChanged={this.props.onIncludeChanged}
-        text={diff.text}
-        hunks={diff.hunks}
+        onDiscardChanges={this.props.onDiscardChanges}
+        askForConfirmationOnDiscardChanges={
+          this.props.askForConfirmationOnDiscardChanges
+        }
+        onHideWhitespaceInDiffChanged={this.props.onHideWhitespaceInDiffChanged}
+        showDiffCheckMarks={this.props.showDiffCheckMarks}
       />
     )
   }

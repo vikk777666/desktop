@@ -11,8 +11,21 @@ import { GitStore } from '../../../src/lib/stores'
 import { Branch, BranchType } from '../../../src/models/branch'
 import { getStatusOrThrow } from '../../helpers/status'
 import { GitProcess } from 'dugite'
+import { StatsStore, StatsDatabase } from '../../../src/lib/stats'
+import { UiActivityMonitor } from '../../../src/ui/lib/ui-activity-monitor'
+import { fakePost } from '../../fake-stats-post'
 
 describe('git/checkout', () => {
+  let statsStore: StatsStore
+
+  beforeEach(() => {
+    statsStore = new StatsStore(
+      new StatsDatabase('test-StatsDatabase'),
+      new UiActivityMonitor(),
+      fakePost
+    )
+  })
+
   it('throws when invalid characters are used for branch name', async () => {
     const repository = await setupEmptyRepository()
 
@@ -24,32 +37,22 @@ describe('git/checkout', () => {
       type: BranchType.Local,
       tip: {
         sha: '',
-        shortSha: '',
-        summary: '',
-        body: '',
         author: {
           name: '',
           email: '',
           date: new Date(),
           tzOffset: 0,
         },
-        committer: {
-          name: '',
-          email: '',
-          date: new Date(),
-          tzOffset: 0,
-        },
-        authoredByCommitter: true,
-        parentSHAs: [],
-        trailers: [],
-        coAuthors: [],
       },
-      remote: null,
+      remoteName: null,
+      upstreamRemoteName: null,
+      isDesktopForkRemoteBranch: false,
+      ref: '',
     }
 
     let errorRaised = false
     try {
-      await checkoutBranch(repository, null, branch)
+      await checkoutBranch(repository, branch, null)
     } catch (error) {
       errorRaised = true
       expect(error.message).toBe('fatal: invalid reference: ..\n')
@@ -71,9 +74,9 @@ describe('git/checkout', () => {
       throw new Error(`Could not find branch: commit-with-long-description`)
     }
 
-    await checkoutBranch(repository, null, branches[0])
+    await checkoutBranch(repository, branches[0], null)
 
-    const store = new GitStore(repository, shell)
+    const store = new GitStore(repository, shell, statsStore)
     await store.loadStatus()
     const tip = store.tip
 
@@ -106,9 +109,9 @@ describe('git/checkout', () => {
       throw new Error(`Could not find branch: '${secondBranch}'`)
     }
 
-    await checkoutBranch(repository, null, firstRemoteBranch)
+    await checkoutBranch(repository, firstRemoteBranch, null)
 
-    const store = new GitStore(repository, shell)
+    const store = new GitStore(repository, shell, statsStore)
     await store.loadStatus()
     const tip = store.tip
 
@@ -117,7 +120,7 @@ describe('git/checkout', () => {
     const validBranch = tip as IValidBranch
     expect(validBranch.branch.name).toBe(expectedBranch)
     expect(validBranch.branch.type).toBe(BranchType.Local)
-    expect(validBranch.branch.remote).toBe('first-remote')
+    expect(validBranch.branch.upstreamRemoteName).toBe('first-remote')
   })
 
   it('will fail when an existing branch matches the remote branch', async () => {
@@ -140,7 +143,7 @@ describe('git/checkout', () => {
     let errorRaised = false
 
     try {
-      await checkoutBranch(repository, null, remoteBranch)
+      await checkoutBranch(repository, remoteBranch, null)
     } catch (error) {
       errorRaised = true
       expect(error.message).toBe('A branch with that name already exists.')
@@ -167,7 +170,7 @@ describe('git/checkout', () => {
         throw new Error(`Could not find branch: 'master'`)
       }
 
-      await checkoutBranch(repository, null, masterBranch)
+      await checkoutBranch(repository, masterBranch, null)
 
       const status = await getStatusOrThrow(repository)
 
@@ -191,7 +194,7 @@ describe('git/checkout', () => {
         throw new Error(`Could not find branch: 'dev'`)
       }
 
-      await checkoutBranch(repository, null, devBranch)
+      await checkoutBranch(repository, devBranch, null)
 
       const status = await getStatusOrThrow(repository)
       expect(status.workingDirectory.files).toHaveLength(0)

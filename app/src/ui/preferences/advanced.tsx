@@ -2,43 +2,25 @@ import * as React from 'react'
 import { DialogContent } from '../dialog'
 import { Checkbox, CheckboxValue } from '../lib/checkbox'
 import { LinkButton } from '../lib/link-button'
-import { Row } from '../../ui/lib/row'
 import { SamplesURL } from '../../lib/stats'
-import { Select } from '../lib/select'
-import { ExternalEditor, parse as parseEditor } from '../../lib/editors'
-import { Shell, parse as parseShell } from '../../lib/shells'
-import { TextBox } from '../lib/text-box'
-import { enableMergeTool } from '../../lib/feature-flag'
-import { IMergeTool } from '../../lib/git/config'
+import { isWindowsOpenSSHAvailable } from '../../lib/ssh/ssh'
+import { enableExternalCredentialHelper } from '../../lib/feature-flag'
 
 interface IAdvancedPreferencesProps {
+  readonly useWindowsOpenSSH: boolean
   readonly optOutOfUsageTracking: boolean
-  readonly confirmRepositoryRemoval: boolean
-  readonly confirmDiscardChanges: boolean
-  readonly confirmForcePush: boolean
-  readonly availableEditors: ReadonlyArray<ExternalEditor>
-  readonly selectedExternalEditor: ExternalEditor | null
-  readonly availableShells: ReadonlyArray<Shell>
-  readonly selectedShell: Shell
-  readonly onOptOutofReportingchanged: (checked: boolean) => void
-  readonly onConfirmDiscardChangesChanged: (checked: boolean) => void
-  readonly onConfirmRepositoryRemovalChanged: (checked: boolean) => void
-  readonly onConfirmForcePushChanged: (checked: boolean) => void
-  readonly onSelectedEditorChanged: (editor: ExternalEditor) => void
-  readonly onSelectedShellChanged: (shell: Shell) => void
-
-  readonly mergeTool: IMergeTool | null
-  readonly onMergeToolNameChanged: (name: string) => void
-  readonly onMergeToolCommandChanged: (command: string) => void
+  readonly useExternalCredentialHelper: boolean
+  readonly repositoryIndicatorsEnabled: boolean
+  readonly onUseWindowsOpenSSHChanged: (checked: boolean) => void
+  readonly onOptOutofReportingChanged: (checked: boolean) => void
+  readonly onUseExternalCredentialHelperChanged: (checked: boolean) => void
+  readonly onRepositoryIndicatorsEnabledChanged: (enabled: boolean) => void
 }
 
 interface IAdvancedPreferencesState {
   readonly optOutOfUsageTracking: boolean
-  readonly selectedExternalEditor: ExternalEditor | null
-  readonly selectedShell: Shell
-  readonly confirmRepositoryRemoval: boolean
-  readonly confirmDiscardChanges: boolean
-  readonly confirmForcePush: boolean
+  readonly canUseWindowsSSH: boolean
+  readonly useExternalCredentialHelper: boolean
 }
 
 export class Advanced extends React.Component<
@@ -50,41 +32,17 @@ export class Advanced extends React.Component<
 
     this.state = {
       optOutOfUsageTracking: this.props.optOutOfUsageTracking,
-      confirmRepositoryRemoval: this.props.confirmRepositoryRemoval,
-      confirmDiscardChanges: this.props.confirmDiscardChanges,
-      confirmForcePush: this.props.confirmForcePush,
-      selectedExternalEditor: this.props.selectedExternalEditor,
-      selectedShell: this.props.selectedShell,
+      canUseWindowsSSH: false,
+      useExternalCredentialHelper: this.props.useExternalCredentialHelper,
     }
   }
 
-  public async componentWillReceiveProps(nextProps: IAdvancedPreferencesProps) {
-    const editors = nextProps.availableEditors
-    let selectedExternalEditor = nextProps.selectedExternalEditor
-    if (editors.length) {
-      const indexOf = selectedExternalEditor
-        ? editors.indexOf(selectedExternalEditor)
-        : -1
-      if (indexOf === -1) {
-        selectedExternalEditor = editors[0]
-        nextProps.onSelectedEditorChanged(selectedExternalEditor)
-      }
-    }
+  public componentDidMount() {
+    this.checkSSHAvailability()
+  }
 
-    const shells = nextProps.availableShells
-    let selectedShell = nextProps.selectedShell
-    if (shells.length) {
-      const indexOf = shells.indexOf(selectedShell)
-      if (indexOf === -1) {
-        selectedShell = shells[0]
-        nextProps.onSelectedShellChanged(selectedShell)
-      }
-    }
-
-    this.setState({
-      selectedExternalEditor,
-      selectedShell,
-    })
+  private async checkSSHAvailability() {
+    this.setState({ canUseWindowsSSH: await isWindowsOpenSSHAvailable() })
   }
 
   private onReportingOptOutChanged = (
@@ -93,52 +51,28 @@ export class Advanced extends React.Component<
     const value = !event.currentTarget.checked
 
     this.setState({ optOutOfUsageTracking: value })
-    this.props.onOptOutofReportingchanged(value)
+    this.props.onOptOutofReportingChanged(value)
   }
 
-  private onConfirmDiscardChangesChanged = (
+  private onUseExternalCredentialHelperChanged = (
     event: React.FormEvent<HTMLInputElement>
   ) => {
     const value = event.currentTarget.checked
 
-    this.setState({ confirmDiscardChanges: value })
-    this.props.onConfirmDiscardChangesChanged(value)
+    this.setState({ useExternalCredentialHelper: value })
+    this.props.onUseExternalCredentialHelperChanged(value)
   }
 
-  private onConfirmForcePushChanged = (
+  private onRepositoryIndicatorsEnabledChanged = (
     event: React.FormEvent<HTMLInputElement>
   ) => {
-    const value = event.currentTarget.checked
-
-    this.setState({ confirmForcePush: value })
-    this.props.onConfirmForcePushChanged(value)
+    this.props.onRepositoryIndicatorsEnabledChanged(event.currentTarget.checked)
   }
 
-  private onConfirmRepositoryRemovalChanged = (
+  private onUseWindowsOpenSSHChanged = (
     event: React.FormEvent<HTMLInputElement>
   ) => {
-    const value = event.currentTarget.checked
-
-    this.setState({ confirmRepositoryRemoval: value })
-    this.props.onConfirmRepositoryRemovalChanged(value)
-  }
-
-  private onSelectedEditorChanged = (
-    event: React.FormEvent<HTMLSelectElement>
-  ) => {
-    const value = parseEditor(event.currentTarget.value)
-    if (value) {
-      this.setState({ selectedExternalEditor: value })
-      this.props.onSelectedEditorChanged(value)
-    }
-  }
-
-  private onSelectedShellChanged = (
-    event: React.FormEvent<HTMLSelectElement>
-  ) => {
-    const value = parseShell(event.currentTarget.value)
-    this.setState({ selectedShell: value })
-    this.props.onSelectedShellChanged(value)
+    this.props.onUseWindowsOpenSSHChanged(event.currentTarget.checked)
   }
 
   private reportDesktopUsageLabel() {
@@ -150,98 +84,39 @@ export class Advanced extends React.Component<
     )
   }
 
-  private renderExternalEditor() {
-    const options = this.props.availableEditors
-    const selectedEditor = this.state.selectedExternalEditor
-    const label = __DARWIN__ ? 'External Editor' : 'External editor'
-
-    if (options.length === 0) {
-      // this is emulating the <Select/> component's UI so the styles are
-      // consistent for either case.
-      //
-      // TODO: see whether it makes sense to have a fallback UI
-      // which we display when the select list is empty
-      return (
-        <div className="select-component no-options-found">
-          <label>{label}</label>
-          <span>
-            No editors found.{' '}
-            <LinkButton uri="https://atom.io/">Install Atom?</LinkButton>
-          </span>
-        </div>
-      )
-    }
-
-    return (
-      <Select
-        label={label}
-        value={selectedEditor ? selectedEditor : undefined}
-        onChange={this.onSelectedEditorChanged}
-      >
-        {options.map(n => (
-          <option key={n} value={n}>
-            {n}
-          </option>
-        ))}
-      </Select>
-    )
-  }
-
-  private renderSelectedShell() {
-    const options = this.props.availableShells
-
-    return (
-      <Select
-        label="Shell"
-        value={this.state.selectedShell}
-        onChange={this.onSelectedShellChanged}
-      >
-        {options.map(n => (
-          <option key={n} value={n}>
-            {n}
-          </option>
-        ))}
-      </Select>
-    )
-  }
-
-  private renderMergeTool() {
-    if (!enableMergeTool()) {
-      return null
-    }
-
-    const mergeTool = this.props.mergeTool
-
-    return (
-      <div className="brutalism">
-        <strong>{__DARWIN__ ? 'Merge Tool' : 'Merge tool'}</strong>
-
-        <Row>
-          <TextBox
-            placeholder="Name"
-            value={mergeTool ? mergeTool.name : ''}
-            onValueChanged={this.props.onMergeToolNameChanged}
-          />
-        </Row>
-
-        <Row>
-          <TextBox
-            placeholder="Command"
-            value={mergeTool && mergeTool.command ? mergeTool.command : ''}
-            onValueChanged={this.props.onMergeToolCommandChanged}
-          />
-        </Row>
-      </div>
-    )
-  }
-
   public render() {
     return (
       <DialogContent>
-        <Row>{this.renderExternalEditor()}</Row>
-        <Row>{this.renderSelectedShell()}</Row>
-        {this.renderMergeTool()}
-        <Row>
+        <div className="advanced-section">
+          <h2>Background updates</h2>
+          <Checkbox
+            label="Show status icons in the repository list"
+            value={
+              this.props.repositoryIndicatorsEnabled
+                ? CheckboxValue.On
+                : CheckboxValue.Off
+            }
+            onChange={this.onRepositoryIndicatorsEnabledChanged}
+            ariaDescribedBy="periodic-fetch-description"
+          />
+          <div
+            id="periodic-fetch-description"
+            className="git-settings-description"
+          >
+            <p>
+              These icons indicate which repositories have local or remote
+              changes, and require the periodic fetching of repositories that
+              are not currently selected.
+            </p>
+            <p>
+              Turning this off will not stop the periodic fetching of your
+              currently selected repository, but may improve overall app
+              performance for users with many repositories.
+            </p>
+          </div>
+        </div>
+        <div className="advanced-section">
+          <h2>Usage</h2>
           <Checkbox
             label={this.reportDesktopUsageLabel()}
             value={
@@ -251,39 +126,57 @@ export class Advanced extends React.Component<
             }
             onChange={this.onReportingOptOutChanged}
           />
-        </Row>
-        <Row>
-          <Checkbox
-            label="Show confirmation dialog before removing repositories"
-            value={
-              this.state.confirmRepositoryRemoval
-                ? CheckboxValue.On
-                : CheckboxValue.Off
-            }
-            onChange={this.onConfirmRepositoryRemovalChanged}
-          />
-        </Row>
-        <Row>
-          <Checkbox
-            label="Show confirmation dialog before discarding changes"
-            value={
-              this.state.confirmDiscardChanges
-                ? CheckboxValue.On
-                : CheckboxValue.Off
-            }
-            onChange={this.onConfirmDiscardChangesChanged}
-          />
-        </Row>
-        <Row>
-          <Checkbox
-            label="Show confirmation dialog before force pushing"
-            value={
-              this.state.confirmForcePush ? CheckboxValue.On : CheckboxValue.Off
-            }
-            onChange={this.onConfirmForcePushChanged}
-          />
-        </Row>
+        </div>
+        {(this.state.canUseWindowsSSH || enableExternalCredentialHelper()) && (
+          <h2>Network and credentials</h2>
+        )}
+        {this.renderSSHSettings()}
+        {enableExternalCredentialHelper() && (
+          <div className="advanced-section">
+            <Checkbox
+              label={'Use Git Credential Manager'}
+              value={
+                this.state.useExternalCredentialHelper
+                  ? CheckboxValue.On
+                  : CheckboxValue.Off
+              }
+              onChange={this.onUseExternalCredentialHelperChanged}
+              ariaDescribedBy="use-external-credential-helper-description"
+            />
+            <div
+              id="use-external-credential-helper-description"
+              className="git-settings-description"
+            >
+              <p>
+                Use{' '}
+                <LinkButton uri="https://gh.io/gcm">
+                  Git Credential Manager{' '}
+                </LinkButton>{' '}
+                for private repositories outside of GitHub.com. This feature is
+                experimental and subject to change.
+              </p>
+            </div>
+          </div>
+        )}
       </DialogContent>
+    )
+  }
+
+  private renderSSHSettings() {
+    if (!this.state.canUseWindowsSSH) {
+      return null
+    }
+
+    return (
+      <div className="advanced-section">
+        <Checkbox
+          label="Use system OpenSSH (recommended)"
+          value={
+            this.props.useWindowsOpenSSH ? CheckboxValue.On : CheckboxValue.Off
+          }
+          onChange={this.onUseWindowsOpenSSHChanged}
+        />
+      </div>
     )
   }
 }

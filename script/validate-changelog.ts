@@ -3,30 +3,29 @@
 import * as Path from 'path'
 import * as Fs from 'fs'
 
-import * as Ajv from 'ajv'
+import Ajv, { ErrorObject } from 'ajv'
 
 function handleError(error: string) {
   console.error(error)
   process.exit(-1)
 }
 
-function formatErrors(errors: Ajv.ErrorObject[]): string {
+function formatErrors(errors: ErrorObject[]): string {
   return errors
     .map(error => {
-      const { dataPath, message } = error
+      const { instancePath, message } = error
       const additionalProperties = error.params as any
-      const additionalProperty = additionalProperties.additionalProperty as string
+      const additionalProperty =
+        additionalProperties.additionalProperty as string
 
       let additionalPropertyText = ''
 
       if (additionalProperty != null) {
-        additionalPropertyText = `, found: '${
-          additionalProperties.additionalProperty
-        }'`
+        additionalPropertyText = `, found: '${additionalProperties.additionalProperty}'`
       }
 
-      // dataPath starts with a leading "."," which is a bit confusing
-      const element = dataPath.substr(1)
+      // instancePath starts with a leading "."," which is a bit confusing
+      const element = instancePath.substring(1)
 
       return ` - ${element} - ${message}${additionalPropertyText}`
     })
@@ -61,7 +60,6 @@ const schema = {
           items: {
             type: 'string',
           },
-          uniqueItems: true,
         },
       },
       additionalProperties: false,
@@ -69,7 +67,7 @@ const schema = {
   },
 }
 
-const ajv = new Ajv({ allErrors: true, uniqueItems: true })
+const ajv = new Ajv({ allErrors: true })
 const validate = ajv.compile(schema)
 
 const valid = validate(changelogObj)

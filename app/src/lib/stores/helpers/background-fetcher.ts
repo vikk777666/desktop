@@ -1,8 +1,8 @@
 import { Repository } from '../../../models/repository'
-import { Account } from '../../../models/account'
 import { GitHubRepository } from '../../../models/github-repository'
-import { API } from '../../api'
+import { API, getAccountForEndpoint } from '../../api'
 import { fatalError } from '../../fatal-error'
+import { AccountsStore } from '../accounts-store'
 
 /**
  * A default interval at which to automatically fetch repositories, if the
@@ -24,11 +24,6 @@ const SkewUpperBound = 30 * 1000
 
 /** The class which handles doing background fetches of the repository. */
 export class BackgroundFetcher {
-  private readonly repository: Repository
-  private readonly account: Account
-  private readonly fetch: (repository: Repository) => Promise<void>
-  private readonly shouldPerformFetch: (repository: Repository) => boolean
-
   /** The handle for our setTimeout invocation. */
   private timeoutHandle: number | null = null
 
@@ -36,22 +31,18 @@ export class BackgroundFetcher {
   private stopped = false
 
   public constructor(
-    repository: Repository,
-    account: Account,
-    fetch: (repository: Repository) => Promise<void>,
-    shouldPerformFetch: (repository: Repository) => boolean
-  ) {
-    this.repository = repository
-    this.account = account
-    this.fetch = fetch
-    this.shouldPerformFetch = shouldPerformFetch
-  }
+    private readonly repository: Repository,
+    private readonly accountsStore: AccountsStore,
+    private readonly fetch: (repository: Repository) => Promise<void>,
+    private readonly shouldPerformFetch: (
+      repository: Repository
+    ) => Promise<boolean>
+  ) {}
 
   /** Start background fetching. */
   public start(withInitialSkew: boolean) {
     if (this.stopped) {
       fatalError('Cannot start a background fetcher that has been stopped.')
-      return
     }
 
     const gitHubRepository = this.repository.gitHubRepository
@@ -91,7 +82,12 @@ export class BackgroundFetcher {
       return
     }
 
-    const shouldFetch = this.shouldPerformFetch(this.repository)
+    const shouldFetch = await this.shouldPerformFetch(this.repository)
+
+    if (this.stopped) {
+      return
+    }
+
     if (shouldFetch) {
       try {
         await this.fetch(this.repository)
@@ -123,21 +119,29 @@ export class BackgroundFetcher {
   private async getFetchInterval(
     repository: GitHubRepository
   ): Promise<number> {
-    const api = API.fromAccount(this.account)
+    const account = getAccountForEndpoint(
+      await this.accountsStore.getAll(),
+      repository.endpoint
+    )
 
     let interval = DefaultFetchInterval
-    try {
-      const pollInterval = await api.getFetchPollInterval(
-        repository.owner.login,
-        repository.name
-      )
-      if (pollInterval) {
-        interval = Math.max(pollInterval, MinimumInterval)
-      } else {
-        interval = DefaultFetchInterval
+
+    if (account) {
+      const api = API.fromAccount(account)
+
+      try {
+        const pollInterval = await api.getFetchPollInterval(
+          repository.owner.login,
+          repository.name
+        )
+        if (pollInterval) {
+          interval = Math.max(pollInterval, MinimumInterval)
+        } else {
+          interval = DefaultFetchInterval
+        }
+      } catch (e) {
+        log.error('Error fetching poll interval', e)
       }
-    } catch (e) {
-      log.error('Error fetching poll interval', e)
     }
 
     return interval + skewInterval()
@@ -152,7 +156,7 @@ let _skewInterval: number | null = null
  */
 function skewInterval(): number {
   if (_skewInterval !== null) {
-    return _skewInterval!
+    return _skewInterval
   }
 
   // We don't need cryptographically secure random numbers for

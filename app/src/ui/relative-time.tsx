@@ -1,5 +1,7 @@
 import * as React from 'react'
-import * as moment from 'moment'
+import { TooltippedContent } from './lib/tooltipped-content'
+import { formatDate } from '../lib/format-date'
+import { formatRelative } from '../lib/format-relative'
 
 interface IRelativeTimeProps {
   /**
@@ -7,6 +9,15 @@ interface IRelativeTimeProps {
    * the relative time elapsed
    */
   readonly date: Date
+
+  /**
+   * By default the RelativeTime component will start displaying a compact
+   * absolute date if the date is more than one week ago. Setting `onlyRelative`
+   * to true overrides this behavior and forces relative times for all dates.
+   */
+  readonly onlyRelative?: boolean
+
+  readonly className?: string
 }
 
 interface IRelativeTimeState {
@@ -24,10 +35,67 @@ const DAY = HOUR * 24
 //  http://stackoverflow.com/a/16314807
 const MAX_INTERVAL = 2147483647
 
+type RelativeTimeInfo = {
+  absoluteText: string
+  relativeText: string
+  duration?: number
+}
+
+export function getRelativeTimeInfoFromDate(
+  then: Date,
+  onlyRelative: boolean = true
+): RelativeTimeInfo {
+  const diff = then.getTime() - Date.now()
+  const duration = Math.abs(diff)
+
+  const absoluteText = formatDate(then, {
+    dateStyle: 'full',
+    timeStyle: 'short',
+  })
+
+  const relativeText = formatRelative(diff)
+
+  // Future date, let's just show as absolute and reschedule. If it's less
+  // than a minute into the future we'll treat it as 'just now'.
+  if (diff > 0 && duration > MINUTE) {
+    return {
+      absoluteText,
+      relativeText: formatDate(then, {
+        dateStyle: 'medium',
+        timeStyle: 'short',
+      }),
+      duration,
+    }
+  } else if (duration < MINUTE) {
+    return {
+      absoluteText,
+      relativeText: 'just now',
+      duration: MINUTE - duration,
+    }
+  } else if (duration < HOUR) {
+    return { absoluteText, relativeText, duration: MINUTE }
+  } else if (duration < DAY) {
+    return { absoluteText, relativeText, duration: HOUR }
+  } else if (duration < 7 * DAY) {
+    return { absoluteText, relativeText, duration: 6 * HOUR }
+  } else {
+    if (onlyRelative) {
+      return { absoluteText, relativeText, duration: 6 * HOUR }
+    } else {
+      // More than a week ago, just the date will suffice
+      return {
+        absoluteText,
+        relativeText: formatDate(then, { dateStyle: 'medium' }),
+      }
+    }
+  }
+}
+
 /**
  * An auto-updating component rendering a relative time in human readable form.
  *
  * Example: 'just now', '4 minutes ago', '3 days ago'.
+ * or if abbreviated: 'just now', '4m', '3d'.
  *
  * For timestamps that are more than 7 days in the past the absolute
  * date is rendered instead.
@@ -66,27 +134,16 @@ export class RelativeTime extends React.Component<
     this.setState({ absoluteText, relativeText })
   }
 
-  private updateWithDate(date: Date) {
-    const then = moment(date)
-    const now = moment()
-    const diff = then.diff(now)
-    const duration = Math.abs(diff)
-    const absoluteText = then.format('LLLL')
+  private updateWithDate(then: Date) {
+    const { onlyRelative } = this.props
 
-    // Future date, let's just show as absolute and reschedule. If it's less
-    // than a minute into the future we'll treat it as 'just now'.
-    if (diff > 0 && duration > MINUTE) {
-      this.updateAndSchedule(absoluteText, then.format('lll'), duration)
-    } else if (duration < MINUTE) {
-      this.updateAndSchedule(absoluteText, 'just now', MINUTE - duration)
-    } else if (duration < HOUR) {
-      this.updateAndSchedule(absoluteText, then.from(now), MINUTE)
-    } else if (duration < DAY) {
-      this.updateAndSchedule(absoluteText, then.from(now), HOUR)
-    } else if (duration < 7 * DAY) {
-      this.updateAndSchedule(absoluteText, then.from(now), 6 * HOUR)
+    const { absoluteText, relativeText, duration } =
+      getRelativeTimeInfoFromDate(then, onlyRelative)
+
+    if (duration !== undefined) {
+      this.updateAndSchedule(absoluteText, relativeText, duration)
     } else {
-      this.setState({ absoluteText, relativeText: then.format('ll') })
+      this.setState({ absoluteText, relativeText })
     }
   }
 
@@ -121,7 +178,12 @@ export class RelativeTime extends React.Component<
 
   public render() {
     return (
-      <span title={this.state.absoluteText}>{this.state.relativeText}</span>
+      <TooltippedContent
+        className={this.props.className}
+        tooltip={this.state.absoluteText}
+      >
+        {this.state.relativeText}
+      </TooltippedContent>
     )
   }
 }

@@ -1,5 +1,5 @@
 import * as React from 'react'
-import * as classNames from 'classnames'
+import classNames from 'classnames'
 
 import { Dispatcher } from '../dispatcher'
 import { encodePathAsUrl } from '../../lib/path'
@@ -7,24 +7,20 @@ import { Account } from '../../models/account'
 import { SignInState, SignInStep } from '../../lib/stores'
 import { assertNever } from '../../lib/fatal-error'
 import { Start } from './start'
-import { SignInDotCom } from './sign-in-dot-com'
 import { SignInEnterprise } from './sign-in-enterprise'
 import { ConfigureGit } from './configure-git'
 import { UiView } from '../ui-view'
-import { UsageOptOut } from './usage-opt-out'
 
 /** The steps along the Welcome flow. */
 export enum WelcomeStep {
   Start = 'Start',
-  SignInToDotCom = 'SignInToDotCom',
+  SignInToDotComWithBrowser = 'SignInToDotComWithBrowser',
   SignInToEnterprise = 'SignInToEnterprise',
   ConfigureGit = 'ConfigureGit',
-  UsageOptOut = 'UsageOptOut',
 }
 
 interface IWelcomeProps {
   readonly dispatcher: Dispatcher
-  readonly optOut: boolean
   readonly accounts: ReadonlyArray<Account>
   readonly signInState: SignInState | null
 }
@@ -61,7 +57,10 @@ export class Welcome extends React.Component<IWelcomeProps, IWelcomeState> {
   public constructor(props: IWelcomeProps) {
     super(props)
 
-    this.state = { currentStep: WelcomeStep.Start, exiting: false }
+    this.state = {
+      currentStep: WelcomeStep.Start,
+      exiting: false,
+    }
   }
 
   public componentWillReceiveProps(nextProps: IWelcomeProps) {
@@ -78,7 +77,7 @@ export class Welcome extends React.Component<IWelcomeProps, IWelcomeState> {
    * in or enterprise sign in.
    */
   private get inSignInStep() {
-    if (this.state.currentStep === WelcomeStep.SignInToDotCom) {
+    if (this.state.currentStep === WelcomeStep.SignInToDotComWithBrowser) {
       return true
     }
 
@@ -119,9 +118,7 @@ export class Welcome extends React.Component<IWelcomeProps, IWelcomeState> {
     // Only advance when the state first changes...
     if (this.props.signInState.kind === nextProps.signInState.kind) {
       log.info(
-        `[Welcome] kind ${this.props.signInState.kind} is the same as ${
-          nextProps.signInState.kind
-        }. ignoring...`
+        `[Welcome] kind ${this.props.signInState.kind} is the same as ${nextProps.signInState.kind}. ignoring...`
       )
       return
     }
@@ -139,14 +136,18 @@ export class Welcome extends React.Component<IWelcomeProps, IWelcomeState> {
 
     switch (step) {
       case WelcomeStep.Start:
-        return <Start advance={this.advanceToStep} />
+      case WelcomeStep.SignInToDotComWithBrowser:
+        const loadingBrowserAuth =
+          step === WelcomeStep.SignInToDotComWithBrowser &&
+          signInState !== null &&
+          signInState.kind === SignInStep.Authentication &&
+          signInState.loading
 
-      case WelcomeStep.SignInToDotCom:
         return (
-          <SignInDotCom
-            dispatcher={this.props.dispatcher}
+          <Start
             advance={this.advanceToStep}
-            signInState={signInState}
+            dispatcher={this.props.dispatcher}
+            loadingBrowserAuth={loadingBrowserAuth}
           />
         )
 
@@ -164,15 +165,6 @@ export class Welcome extends React.Component<IWelcomeProps, IWelcomeState> {
           <ConfigureGit
             advance={this.advanceToStep}
             accounts={this.props.accounts}
-          />
-        )
-
-      case WelcomeStep.UsageOptOut:
-        return (
-          <UsageOptOut
-            dispatcher={this.props.dispatcher}
-            advance={this.advanceToStep}
-            optOut={this.props.optOut}
             done={this.done}
           />
         )
@@ -184,9 +176,7 @@ export class Welcome extends React.Component<IWelcomeProps, IWelcomeState> {
 
   private advanceToStep = (step: WelcomeStep) => {
     log.info(`[Welcome] advancing to step: ${step}`)
-    if (step === WelcomeStep.SignInToDotCom) {
-      this.props.dispatcher.beginDotComSignIn()
-    } else if (step === WelcomeStep.SignInToEnterprise) {
+    if (step === WelcomeStep.SignInToEnterprise) {
       this.props.dispatcher.beginEnterpriseSignIn()
     }
 
@@ -212,16 +202,21 @@ export class Welcome extends React.Component<IWelcomeProps, IWelcomeState> {
         <div className="welcome-left">
           <div className="welcome-content">
             {this.getComponentForCurrentStep()}
-            <img className="welcome-graphic-top" src={WelcomeLeftTopImageUri} />
+            <img
+              className="welcome-graphic-top"
+              src={WelcomeLeftTopImageUri}
+              alt=""
+            />
             <img
               className="welcome-graphic-bottom"
               src={WelcomeLeftBottomImageUri}
+              alt=""
             />
           </div>
         </div>
 
         <div className="welcome-right">
-          <img className="welcome-graphic" src={WelcomeRightImageUri} />
+          <img className="welcome-graphic" src={WelcomeRightImageUri} alt="" />
         </div>
       </UiView>
     )

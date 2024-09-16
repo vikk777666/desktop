@@ -3,29 +3,43 @@ import * as React from 'react'
 import { encodePathAsUrl } from '../../lib/path'
 import { Repository } from '../../models/repository'
 import { LinkButton } from '../lib/link-button'
-import {
-  enableNoChangesCreatePRBlankslateAction,
-  enableStashing,
-} from '../../lib/feature-flag'
 import { MenuIDs } from '../../models/menu-ids'
 import { IMenu, MenuItem } from '../../models/app-menu'
 import memoizeOne from 'memoize-one'
 import { getPlatformSpecificNameOrSymbolForModifier } from '../../lib/menu-item'
 import { MenuBackedSuggestedAction } from '../suggested-actions'
-import { executeMenuItemById } from '../main-process-proxy'
 import { IRepositoryState } from '../../lib/app-state'
 import { TipState, IValidBranch } from '../../models/tip'
 import { Ref } from '../lib/ref'
 import { IAheadBehind } from '../../models/branch'
 import { IRemote } from '../../models/remote'
-import { isCurrentBranchForcePush } from '../../lib/rebase'
+import {
+  ForcePushBranchState,
+  getCurrentBranchForcePushState,
+} from '../../lib/rebase'
 import { StashedChangesLoadStates } from '../../models/stash-entry'
 import { Dispatcher } from '../dispatcher'
 import { SuggestedActionGroup } from '../suggested-actions'
+import { PreferencesTab } from '../../models/preferences'
+import { PopupType } from '../../models/popup'
+import {
+  DropdownSuggestedAction,
+  IDropdownSuggestedActionOption,
+} from '../suggested-actions/dropdown-suggested-action'
+import {
+  PullRequestSuggestedNextAction,
+  isIdPullRequestSuggestedNextAction,
+} from '../../models/pull-request'
+import { KeyboardShortcut } from '../keyboard-shortcut/keyboard-shortcut'
 
 function formatMenuItemLabel(text: string) {
   if (__WIN32__ || __LINUX__) {
-    return text.replace('&', '')
+    // Ampersand has a special meaning on Windows where it denotes
+    // the access key (usually rendered as an underline on the following)
+    // character. A literal ampersand is escaped by putting another ampersand
+    // in front of it (&&). Here we strip single ampersands and unescape
+    // double ampersands. Example: "&Push && Pull" becomes "Push & Pull".
+    return text.replace(/&?&/g, m => (m.length > 1 ? '&' : ''))
   }
 
   return text
@@ -66,6 +80,9 @@ interface INoChangesProps {
    * opening the repository in an external editor.
    */
   readonly isExternalEditorAvailable: boolean
+
+  /** The user's preference of pull request suggested next action to use **/
+  readonly pullRequestSuggestedNextAction?: PullRequestSuggestedNextAction
 }
 
 /**
@@ -145,7 +162,7 @@ function buildMenuItemInfoMap(
     }
 
     const infoItem: IMenuItemInfo = {
-      label: item.label,
+      label: item.label as string,
       acceleratorKeys: getItemAcceleratorKeys(item),
       parentMenuLabels:
         parent === undefined ? [] : [parent.label, ...parent.parentMenuLabels],
@@ -175,7 +192,7 @@ export class NoChanges extends React.Component<
 
   /**
    * ID for the timer that's activated when the component
-   * mounts. See componentDidMount/componenWillUnmount.
+   * mounts. See componentDidMount/componentWillUnmount.
    */
   private transitionTimer: number | null = null
 
@@ -210,8 +227,13 @@ export class NoChanges extends React.Component<
     )
   }
 
-  private renderDiscoverabilityKeyboardShortcut(menuItem: IMenuItemInfo) {
-    return menuItem.acceleratorKeys.map((k, i) => <kbd key={k + i}>{k}</kbd>)
+  private renderDiscoverabilityKeyboardShortcut(menuItemInfo: IMenuItemInfo) {
+    return (
+      <KeyboardShortcut
+        darwinKeys={menuItemInfo.acceleratorKeys}
+        keys={menuItemInfo.acceleratorKeys}
+      />
+    )
   }
 
   private renderMenuBackedAction(
@@ -252,7 +274,7 @@ export class NoChanges extends React.Component<
   }
 
   private onShowInFileManagerClicked = () =>
-    this.props.dispatcher.recordSuggestedStepOpenWorkingDirectory()
+    this.props.dispatcher.incrementMetric('suggestedStepOpenWorkingDirectory')
 
   private renderViewOnGitHub() {
     const isGitHub = this.props.repository.gitHubRepository !== null
@@ -270,10 +292,13 @@ export class NoChanges extends React.Component<
   }
 
   private onViewOnGitHubClicked = () =>
-    this.props.dispatcher.recordSuggestedStepViewOnGitHub()
+    this.props.dispatcher.incrementMetric('suggestedStepViewOnGitHub')
 
-  private openPreferences = () => {
-    executeMenuItemById('preferences')
+  private openIntegrationPreferences = () => {
+    this.props.dispatcher.showPopup({
+      type: PopupType.Preferences,
+      initialSelectedTab: PreferencesTab.Integrations,
+    })
   }
 
   private renderOpenInExternalEditor() {
@@ -301,8 +326,8 @@ export class NoChanges extends React.Component<
     const description = (
       <>
         Select your editor in{' '}
-        <LinkButton onClick={this.openPreferences}>
-          {__DARWIN__ ? 'Preferences' : 'Options'}
+        <LinkButton onClick={this.openIntegrationPreferences}>
+          {__DARWIN__ ? 'Settings' : 'Options'}
         </LinkButton>
       </>
     )
@@ -316,10 +341,11 @@ export class NoChanges extends React.Component<
   }
 
   private onOpenInExternalEditorClicked = () =>
-    this.props.dispatcher.recordSuggestedStepOpenInExternalEditor()
+    this.props.dispatcher.incrementMetric('suggestedStepOpenInExternalEditor')
 
   private renderRemoteAction() {
-    const { remote, aheadBehind, branchesState } = this.props.repositoryState
+    const { remote, aheadBehind, branchesState, tagsToPush } =
+      this.props.repositoryState
     const { tip, defaultBranch, currentPullRequest } = branchesState
 
     if (tip.kind !== TipState.Valid) {
@@ -335,7 +361,9 @@ export class NoChanges extends React.Component<
       return this.renderPublishBranchAction(tip)
     }
 
-    const isForcePush = isCurrentBranchForcePush(branchesState, aheadBehind)
+    const isForcePush =
+      getCurrentBranchForcePushState(branchesState, aheadBehind) ===
+      ForcePushBranchState.Recommended
     if (isForcePush) {
       // do not render an action currently after the rebase has completed, as
       // the default behaviour is currently to pull in changes from the tracking
@@ -347,29 +375,26 @@ export class NoChanges extends React.Component<
       return this.renderPullBranchAction(tip, remote, aheadBehind)
     }
 
-    if (aheadBehind.ahead > 0) {
-      return this.renderPushBranchAction(tip, remote, aheadBehind)
+    if (
+      aheadBehind.ahead > 0 ||
+      (tagsToPush !== null && tagsToPush.length > 0)
+    ) {
+      return this.renderPushBranchAction(tip, remote, aheadBehind, tagsToPush)
     }
 
-    if (enableNoChangesCreatePRBlankslateAction()) {
-      const isGitHub = this.props.repository.gitHubRepository !== null
-      const hasOpenPullRequest = currentPullRequest !== null
-      const isDefaultBranch =
-        defaultBranch !== null && tip.branch.name === defaultBranch.name
+    const isGitHub = this.props.repository.gitHubRepository !== null
+    const hasOpenPullRequest = currentPullRequest !== null
+    const isDefaultBranch =
+      defaultBranch !== null && tip.branch.name === defaultBranch.name
 
-      if (isGitHub && !hasOpenPullRequest && !isDefaultBranch) {
-        return this.renderCreatePullRequestAction(tip)
-      }
+    if (isGitHub && !hasOpenPullRequest && !isDefaultBranch) {
+      return this.renderCreatePullRequestAction(tip)
     }
 
     return null
   }
 
   private renderViewStashAction() {
-    if (!enableStashing()) {
-      return null
-    }
-
     const { changesState, branchesState } = this.props.repositoryState
 
     const { tip } = branchesState
@@ -422,7 +447,7 @@ export class NoChanges extends React.Component<
   }
 
   private onViewStashClicked = () =>
-    this.props.dispatcher.recordSuggestedStepViewStash()
+    this.props.dispatcher.incrementMetric('suggestedStepViewStash')
 
   private renderPublishRepositoryAction() {
     // This is a bit confusing, there's no dedicated
@@ -460,7 +485,7 @@ export class NoChanges extends React.Component<
   }
 
   private onPublishRepositoryClicked = () =>
-    this.props.dispatcher.recordSuggestedStepPublishRepository()
+    this.props.dispatcher.incrementMetric('suggestedStepPublishRepository')
 
   private renderPublishBranchAction(tip: IValidBranch) {
     // This is a bit confusing, there's no dedicated
@@ -509,7 +534,7 @@ export class NoChanges extends React.Component<
   }
 
   private onPublishBranchClicked = () =>
-    this.props.dispatcher.recordSuggestedStepPublishBranch()
+    this.props.dispatcher.incrementMetric('suggestedStepPublishBranch')
 
   private renderPullBranchAction(
     tip: IValidBranch,
@@ -566,7 +591,8 @@ export class NoChanges extends React.Component<
   private renderPushBranchAction(
     tip: IValidBranch,
     remote: IRemote,
-    aheadBehind: IAheadBehind
+    aheadBehind: IAheadBehind,
+    tagsToPush: ReadonlyArray<string> | null
   ) {
     const itemId: MenuIDs = 'push'
     const menuItem = this.getMenuItemInfo(itemId)
@@ -578,13 +604,28 @@ export class NoChanges extends React.Component<
 
     const isGitHub = this.props.repository.gitHubRepository !== null
 
-    const description = (
-      <>
-        You have{' '}
-        {aheadBehind.ahead === 1 ? 'one local commit' : 'local commits'} waiting
-        to be pushed to {isGitHub ? 'GitHub' : 'the remote'}.
-      </>
-    )
+    const itemsToPushTypes = []
+    const itemsToPushDescriptions = []
+
+    if (aheadBehind.ahead > 0) {
+      itemsToPushTypes.push('commits')
+      itemsToPushDescriptions.push(
+        aheadBehind.ahead === 1
+          ? '1 local commit'
+          : `${aheadBehind.ahead} local commits`
+      )
+    }
+
+    if (tagsToPush !== null && tagsToPush.length > 0) {
+      itemsToPushTypes.push('tags')
+      itemsToPushDescriptions.push(
+        tagsToPush.length === 1 ? '1 tag' : `${tagsToPush.length} tags`
+      )
+    }
+
+    const description = `You have ${itemsToPushDescriptions.join(
+      ' and '
+    )} waiting to be pushed to ${isGitHub ? 'GitHub' : 'the remote'}.`
 
     const discoverabilityContent = (
       <>
@@ -593,9 +634,9 @@ export class NoChanges extends React.Component<
       </>
     )
 
-    const title = `Push ${aheadBehind.ahead} ${
-      aheadBehind.ahead === 1 ? 'commit' : 'commits'
-    } to the ${remote.name} remote`
+    const title = `Push ${itemsToPushTypes.join(' and ')} to the ${
+      remote.name
+    } remote`
 
     const buttonText = `Push ${remote.name}`
 
@@ -613,12 +654,16 @@ export class NoChanges extends React.Component<
     )
   }
 
-  private renderCreatePullRequestAction(tip: IValidBranch) {
-    const itemId: MenuIDs = 'create-pull-request'
-    const menuItem = this.getMenuItemInfo(itemId)
+  private onPullRequestSuggestedActionChanged = (action: string) => {
+    if (isIdPullRequestSuggestedNextAction(action)) {
+      this.props.dispatcher.setPullRequestSuggestedNextAction(action)
+    }
+  }
 
-    if (menuItem === undefined) {
-      log.error(`Could not find matching menu item for ${itemId}`)
+  private renderCreatePullRequestAction(tip: IValidBranch) {
+    const createMenuItem = this.getMenuItemInfo('create-pull-request')
+    if (createMenuItem === undefined) {
+      log.error(`Could not find matching menu item for 'create-pull-request'`)
       return null
     }
 
@@ -633,23 +678,55 @@ export class NoChanges extends React.Component<
     const title = `Create a Pull Request from your current branch`
     const buttonText = `Create Pull Request`
 
+    const previewPullMenuItem = this.getMenuItemInfo('preview-pull-request')
+
+    if (previewPullMenuItem === undefined) {
+      log.error(`Could not find matching menu item for 'preview-pull-request'`)
+      return null
+    }
+
+    const createPullRequestAction: IDropdownSuggestedActionOption = {
+      title,
+      label: buttonText,
+      description,
+      id: PullRequestSuggestedNextAction.CreatePullRequest,
+      menuItemId: 'create-pull-request',
+      discoverabilityContent:
+        this.renderDiscoverabilityElements(createMenuItem),
+      disabled: !createMenuItem.enabled,
+      onClick: this.onCreatePullRequestClicked,
+    }
+
+    const previewPullRequestAction: IDropdownSuggestedActionOption = {
+      title: `Preview the Pull Request from your current branch`,
+      label: 'Preview Pull Request',
+      description: (
+        <>
+          The current branch (<Ref>{tip.branch.name}</Ref>) is already published
+          to GitHub. Preview the changes this pull request will have before
+          proposing your changes.
+        </>
+      ),
+      id: PullRequestSuggestedNextAction.PreviewPullRequest,
+      menuItemId: 'preview-pull-request',
+      discoverabilityContent:
+        this.renderDiscoverabilityElements(previewPullMenuItem),
+      disabled: !previewPullMenuItem.enabled,
+    }
+
     return (
-      <MenuBackedSuggestedAction
-        key="create-pr-action"
-        title={title}
-        menuItemId={itemId}
-        description={description}
-        buttonText={buttonText}
-        discoverabilityContent={this.renderDiscoverabilityElements(menuItem)}
-        type="primary"
-        disabled={!menuItem.enabled}
-        onClick={this.onCreatePullRequestClicked}
+      <DropdownSuggestedAction
+        key="pull-request-action"
+        className="pull-request-action"
+        suggestedActions={[previewPullRequestAction, createPullRequestAction]}
+        selectedActionValue={this.props.pullRequestSuggestedNextAction}
+        onSuggestedActionChanged={this.onPullRequestSuggestedActionChanged}
       />
     )
   }
 
   private onCreatePullRequestClicked = () =>
-    this.props.dispatcher.recordSuggestedStepCreatePullRequest()
+    this.props.dispatcher.incrementMetric('suggestedStepCreatePullRequest')
 
   private renderActions() {
     return (
@@ -685,9 +762,9 @@ export class NoChanges extends React.Component<
 
   public render() {
     return (
-      <div id="no-changes">
+      <div className="changes-interstitial">
         <div className="content">
-          <div className="header">
+          <div className="interstitial-header">
             <div className="text">
               <h1>No local changes</h1>
               <p>
@@ -695,7 +772,7 @@ export class NoChanges extends React.Component<
                 some friendly suggestions for what to do next.
               </p>
             </div>
-            <img src={PaperStackImage} className="blankslate-image" />
+            <img src={PaperStackImage} className="blankslate-image" alt="" />
           </div>
           {this.renderActions()}
         </div>

@@ -2,12 +2,12 @@ import {
   groupRepositories,
   YourRepositoriesIdentifier,
 } from '../../src/ui/clone-repository/group-repositories'
-import { IAPIRepository, IAPIIdentity } from '../../src/lib/api'
+import { IAPIIdentity, IAPIFullRepository } from '../../src/lib/api'
 
 const users = {
   shiftkey: {
     id: 1,
-    url: '',
+    html_url: '',
     login: 'shiftkey',
     avatar_url: '',
     name: 'Brendan Forster',
@@ -15,7 +15,7 @@ const users = {
   } as IAPIIdentity,
   desktop: {
     id: 2,
-    url: '',
+    html_url: '',
     login: 'desktop',
     avatar_url: '',
     name: 'Desktop',
@@ -23,7 +23,7 @@ const users = {
   } as IAPIIdentity,
   octokit: {
     id: 3,
-    url: '',
+    html_url: '',
     login: 'octokit',
     avatar_url: '',
     name: 'Octokit',
@@ -32,8 +32,8 @@ const users = {
 }
 
 describe('clone repository grouping', () => {
-  it('groups repositories by organization', () => {
-    const repositories: Array<IAPIRepository> = [
+  it('groups repositories by owner', () => {
+    const repositories: Array<IAPIFullRepository> = [
       {
         clone_url: '',
         ssh_url: '',
@@ -43,13 +43,15 @@ describe('clone repository grouping', () => {
         private: true,
         fork: true,
         default_branch: '',
-        parent: null,
         pushed_at: '1995-12-17T03:24:00',
+        has_issues: true,
+        archived: false,
         permissions: {
           pull: true,
           push: true,
           admin: false,
         },
+        parent: undefined,
       },
       {
         clone_url: '',
@@ -60,13 +62,15 @@ describe('clone repository grouping', () => {
         private: false,
         fork: false,
         default_branch: '',
-        parent: null,
         pushed_at: '1995-12-17T03:24:00',
+        has_issues: true,
+        archived: false,
         permissions: {
           pull: true,
           push: true,
           admin: false,
         },
+        parent: undefined,
       },
       {
         clone_url: '',
@@ -77,13 +81,15 @@ describe('clone repository grouping', () => {
         private: true,
         fork: false,
         default_branch: '',
-        parent: null,
         pushed_at: '1995-12-17T03:24:00',
+        has_issues: true,
+        archived: false,
         permissions: {
           pull: true,
           push: true,
           admin: false,
         },
+        parent: undefined,
       },
     ]
 

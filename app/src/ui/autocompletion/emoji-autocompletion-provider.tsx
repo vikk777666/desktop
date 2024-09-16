@@ -1,6 +1,10 @@
 import * as React from 'react'
 import { IAutocompletionProvider } from './index'
 import { compare } from '../../lib/compare'
+import { DefaultMaxHits } from './common'
+import { Emoji } from '../../lib/emoji'
+
+const sanitizeEmoji = (emoji: string) => emoji.replaceAll(':', '')
 
 /**
  * Interface describing a autocomplete match for the given search
@@ -26,13 +30,14 @@ export interface IEmojiHit {
 
 /** Autocompletion provider for emoji. */
 export class EmojiAutocompletionProvider
-  implements IAutocompletionProvider<IEmojiHit> {
+  implements IAutocompletionProvider<IEmojiHit>
+{
   public readonly kind = 'emoji'
 
-  private emoji: Map<string, string>
+  private readonly allEmoji: Map<string, Emoji>
 
-  public constructor(emoji: Map<string, string>) {
-    this.emoji = emoji
+  public constructor(emoji: Map<string, Emoji>) {
+    this.allEmoji = emoji
   }
 
   public getRegExp(): RegExp {
@@ -40,21 +45,22 @@ export class EmojiAutocompletionProvider
   }
 
   public async getAutocompletionItems(
-    text: string
+    text: string,
+    maxHits = DefaultMaxHits
   ): Promise<ReadonlyArray<IEmojiHit>> {
-    // Empty strings is falsy, this is the happy path to avoid
-    // sorting and matching when the user types a ':'. We want
-    // to open the popup with suggestions as fast as possible.
-    if (!text) {
-      return Array.from(this.emoji.keys()).map<IEmojiHit>(emoji => {
-        return { emoji: emoji, matchStart: 0, matchLength: 0 }
-      })
+    // This is the happy path to avoid sorting and matching
+    // when the user types a ':'. We want to open the popup
+    // with suggestions as fast as possible.
+    if (text.length === 0) {
+      return [...this.allEmoji.keys()]
+        .map(emoji => ({ emoji, matchStart: 0, matchLength: 0 }))
+        .slice(0, maxHits)
     }
 
     const results = new Array<IEmojiHit>()
     const needle = text.toLowerCase()
 
-    for (const emoji of this.emoji.keys()) {
+    for (const emoji of this.allEmoji.keys()) {
       const index = emoji.indexOf(needle)
       if (index !== -1) {
         results.push({ emoji, matchStart: index, matchLength: needle.length })
@@ -72,37 +78,56 @@ export class EmojiAutocompletionProvider
     //
     // If both those start and length are equal we sort
     // alphabetically
-    return results.sort(
-      (x, y) =>
-        compare(x.matchStart, y.matchStart) ||
-        compare(x.emoji.length, y.emoji.length) ||
-        compare(x.emoji, y.emoji)
-    )
+    return results
+      .sort(
+        (x, y) =>
+          compare(x.matchStart, y.matchStart) ||
+          compare(x.emoji.length, y.emoji.length) ||
+          compare(x.emoji, y.emoji)
+      )
+      .slice(0, maxHits)
+  }
+
+  public getItemAriaLabel(hit: IEmojiHit): string {
+    const emoji = this.allEmoji.get(hit.emoji)
+    const sanitizedEmoji = sanitizeEmoji(hit.emoji)
+    const emojiDescription = emoji?.description ?? sanitizedEmoji
+    return emojiDescription === sanitizedEmoji
+      ? emojiDescription
+      : `${emojiDescription}, ${sanitizedEmoji}`
   }
 
   public renderItem(hit: IEmojiHit) {
-    const emoji = hit.emoji
+    const emoji = this.allEmoji.get(hit.emoji)
 
     return (
-      <div className="emoji" key={emoji}>
-        <img className="icon" src={this.emoji.get(emoji)} />
+      <div className="emoji" key={hit.emoji}>
+        <img
+          className="icon"
+          src={emoji?.url}
+          alt={emoji?.description ?? hit.emoji}
+        />
         {this.renderHighlightedTitle(hit)}
       </div>
     )
   }
 
   private renderHighlightedTitle(hit: IEmojiHit) {
-    const emoji = hit.emoji
+    const emoji = sanitizeEmoji(hit.emoji)
 
     if (!hit.matchLength) {
       return <div className="title">{emoji}</div>
     }
 
+    // Offset the match start by one to account for the leading ':' that was
+    // removed from the emoji string
+    const matchStart = hit.matchStart - 1
+
     return (
       <div className="title">
-        {emoji.substr(0, hit.matchStart)}
-        <mark>{emoji.substr(hit.matchStart, hit.matchLength)}</mark>
-        {emoji.substr(hit.matchStart + hit.matchLength)}
+        {emoji.substring(0, matchStart)}
+        <mark>{emoji.substring(matchStart, matchStart + hit.matchLength)}</mark>
+        {emoji.substring(matchStart + hit.matchLength)}
       </div>
     )
   }

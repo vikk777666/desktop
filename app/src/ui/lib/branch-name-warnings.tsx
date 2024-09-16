@@ -2,41 +2,17 @@ import * as React from 'react'
 import { Branch, BranchType } from '../../models/branch'
 
 import { Row } from './row'
-import { Octicon, OcticonSymbol } from '../octicons'
+import { Octicon } from '../octicons'
+import * as octicons from '../octicons/octicons.generated'
 import { Ref } from './ref'
 import { IStashEntry } from '../../models/stash-entry'
+import { enableMoveStash } from '../../lib/feature-flag'
 
-export function renderBranchNameWarning(
-  proposedName: string,
-  sanitizedName: string
-) {
-  if (proposedName.length > 0 && /^\s*$/.test(sanitizedName)) {
-    return (
-      <Row className="warning-helper-text">
-        <Octicon symbol={OcticonSymbol.alert} />
-        <p>
-          <Ref>{proposedName}</Ref> is not a valid branch name.
-        </p>
-      </Row>
-    )
-  } else if (proposedName !== sanitizedName) {
-    return (
-      <Row className="warning-helper-text">
-        <Octicon symbol={OcticonSymbol.alert} />
-        <p>
-          Will be created as <Ref>{sanitizedName}</Ref>.
-        </p>
-      </Row>
-    )
-  } else {
-    return null
-  }
-}
 export function renderBranchHasRemoteWarning(branch: Branch) {
   if (branch.upstream != null) {
     return (
       <Row className="warning-helper-text">
-        <Octicon symbol={OcticonSymbol.alert} />
+        <Octicon symbol={octicons.alert} />
         <p>
           This branch is tracking <Ref>{branch.upstream}</Ref> and renaming this
           branch will not change the branch name on the remote.
@@ -63,7 +39,7 @@ export function renderBranchNameExistsOnRemoteWarning(
 
   return (
     <Row className="warning-helper-text">
-      <Octicon symbol={OcticonSymbol.alert} />
+      <Octicon symbol={octicons.alert} />
       <p>
         A branch named <Ref>{sanitizedName}</Ref> already exists on the remote.
       </p>
@@ -72,12 +48,12 @@ export function renderBranchNameExistsOnRemoteWarning(
 }
 
 export function renderStashWillBeLostWarning(stash: IStashEntry | null) {
-  if (stash === null) {
+  if (stash === null || enableMoveStash()) {
     return null
   }
   return (
     <Row className="warning-helper-text">
-      <Octicon symbol={OcticonSymbol.alert} />
+      <Octicon symbol={octicons.alert} />
       <p>
         Your current stashed changes on this branch will no longer be visible in
         GitHub Desktop if the branch is renamed.

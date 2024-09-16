@@ -1,20 +1,22 @@
 import * as React from 'react'
 import { Account } from '../../models/account'
-import { FilterList, IFilterListGroup } from '../lib/filter-list'
+import { IFilterListGroup } from '../lib/filter-list'
 import { IAPIRepository, getDotComAPIEndpoint, getHTMLURL } from '../../lib/api'
 import {
-  IClonableRepositoryListItem,
+  ICloneableRepositoryListItem,
   groupRepositories,
   YourRepositoriesIdentifier,
 } from './group-repositories'
 import memoizeOne from 'memoize-one'
 import { Button } from '../lib/button'
 import { IMatches } from '../../lib/fuzzy-find'
-import { Octicon, OcticonSymbol } from '../octicons'
+import { Octicon, syncClockwise } from '../octicons'
 import { HighlightText } from '../lib/highlight-text'
 import { ClickSource } from '../lib/list'
 import { LinkButton } from '../lib/link-button'
 import { Ref } from '../lib/ref'
+import { SectionFilterList } from '../lib/section-filter-list'
+import { TooltippedContent } from '../lib/tooltipped-content'
 
 interface ICloneableRepositoryFilterListProps {
   /** The account to clone from. */
@@ -83,7 +85,7 @@ const RowHeight = 31
  * the clone url of the provided repository.
  */
 function findMatchingListItem(
-  groups: ReadonlyArray<IFilterListGroup<IClonableRepositoryListItem>>,
+  groups: ReadonlyArray<IFilterListGroup<ICloneableRepositoryListItem>>,
   selectedRepository: IAPIRepository | null
 ) {
   if (selectedRepository !== null) {
@@ -106,14 +108,12 @@ function findMatchingListItem(
  */
 function findRepositoryForListItem(
   repositories: ReadonlyArray<IAPIRepository>,
-  listItem: IClonableRepositoryListItem
+  listItem: ICloneableRepositoryListItem
 ) {
   return repositories.find(r => r.clone_url === listItem.url) || null
 }
 
-export class CloneableRepositoryFilterList extends React.PureComponent<
-  ICloneableRepositoryFilterListProps
-> {
+export class CloneableRepositoryFilterList extends React.PureComponent<ICloneableRepositoryFilterListProps> {
   /**
    * A memoized function for grouping repositories for display
    * in the FilterList. The group will not be recomputed as long
@@ -155,6 +155,15 @@ export class CloneableRepositoryFilterList extends React.PureComponent<
     this.props.onRefreshRepositories(this.props.account)
   }
 
+  private getGroupAriaLabelGetter =
+    (groups: ReadonlyArray<IFilterListGroup<ICloneableRepositoryListItem>>) =>
+    (group: number) => {
+      const groupIdentifier = groups[group].identifier
+      return groupIdentifier === YourRepositoriesIdentifier
+        ? this.getYourRepositoriesLabel()
+        : groupIdentifier
+    }
+
   public render() {
     const { repositories, account, selectedItem } = this.props
 
@@ -162,8 +171,8 @@ export class CloneableRepositoryFilterList extends React.PureComponent<
     const selectedListItem = this.getSelectedListItem(groups, selectedItem)
 
     return (
-      <FilterList<IClonableRepositoryListItem>
-        className="clone-github-repo"
+      <SectionFilterList<ICloneableRepositoryListItem>
+        className={'clone-github-repo'}
         rowHeight={RowHeight}
         selectedItem={selectedListItem}
         renderItem={this.renderItem}
@@ -176,13 +185,14 @@ export class CloneableRepositoryFilterList extends React.PureComponent<
         renderNoItems={this.renderNoItems}
         renderPostFilter={this.renderPostFilter}
         onItemClick={this.props.onItemClicked ? this.onItemClick : undefined}
-        placeholderText="Filter your repositories"
+        placeholderText={'Filter your repositories'}
+        getGroupAriaLabel={this.getGroupAriaLabelGetter(groups)}
       />
     )
   }
 
   private onItemClick = (
-    item: IClonableRepositoryListItem,
+    item: ICloneableRepositoryListItem,
     source: ClickSource
   ) => {
     const { onItemClicked, repositories } = this.props
@@ -198,7 +208,7 @@ export class CloneableRepositoryFilterList extends React.PureComponent<
     }
   }
 
-  private onSelectionChanged = (item: IClonableRepositoryListItem | null) => {
+  private onSelectionChanged = (item: ICloneableRepositoryListItem | null) => {
     if (item === null || this.props.repositories === null) {
       this.props.onSelectionChanged(null)
     } else {
@@ -208,10 +218,14 @@ export class CloneableRepositoryFilterList extends React.PureComponent<
     }
   }
 
+  private getYourRepositoriesLabel = () => {
+    return __DARWIN__ ? 'Your Repositories' : 'Your repositories'
+  }
+
   private renderGroupHeader = (identifier: string) => {
     let header = identifier
     if (identifier === YourRepositoriesIdentifier) {
-      header = __DARWIN__ ? 'Your Repositories' : 'Your repositories'
+      header = this.getYourRepositoriesLabel()
     }
     return (
       <div className="clone-repository-list-content clone-repository-list-group-header">
@@ -221,28 +235,37 @@ export class CloneableRepositoryFilterList extends React.PureComponent<
   }
 
   private renderItem = (
-    item: IClonableRepositoryListItem,
+    item: ICloneableRepositoryListItem,
     matches: IMatches
   ) => {
     return (
       <div className="clone-repository-list-item">
         <Octicon className="icon" symbol={item.icon} />
-        <div className="name" title={item.text[0]}>
+        <TooltippedContent
+          className="name"
+          tooltip={item.text[0]}
+          onlyWhenOverflowed={true}
+          tagName="div"
+        >
           <HighlightText text={item.text[0]} highlight={matches.title} />
-        </div>
+        </TooltippedContent>
+        {item.archived && <div className="archived">Archived</div>}
       </div>
     )
   }
 
   private renderPostFilter = () => {
+    const tooltip = 'Refresh the list of repositories'
+
     return (
       <Button
         disabled={this.props.loading}
         onClick={this.refreshRepositories}
-        tooltip="Refresh the list of repositories"
+        ariaLabel={tooltip}
+        tooltip={tooltip}
       >
         <Octicon
-          symbol={OcticonSymbol.sync}
+          symbol={syncClockwise}
           className={this.props.loading ? 'spin' : undefined}
         />
       </Button>

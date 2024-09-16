@@ -1,10 +1,12 @@
 import { git, gitNetworkArguments } from './core'
-import { getBranches } from './for-each-ref'
 import { Repository } from '../../models/repository'
-import { Branch, BranchType } from '../../models/branch'
-import { IGitAccount } from '../../models/git-account'
-import { envForAuthentication } from './authentication'
+import { Branch } from '../../models/branch'
 import { formatAsLocalRef } from './refs'
+import { deleteRef } from './update-ref'
+import { GitError as DugiteError } from 'dugite'
+import { envForRemoteOperation } from './environment'
+import { createForEachRefParser } from './git-delimiter-parser'
+import { IRemote } from '../../models/remote'
 
 /**
  * Create a new branch from the given start point.
@@ -18,18 +20,20 @@ import { formatAsLocalRef } from './refs'
 export async function createBranch(
   repository: Repository,
   name: string,
-  startPoint: string | null
-): Promise<Branch | null> {
+  startPoint: string | null,
+  noTrack?: boolean
+): Promise<void> {
   const args =
     startPoint !== null ? ['branch', name, startPoint] : ['branch', name]
 
-  await git(args, repository.path, 'createBranch')
-  const branches = await getBranches(repository, `refs/heads/${name}`)
-  if (branches.length > 0) {
-    return branches[0]
+  // if we're branching directly from a remote branch, we don't want to track it
+  // tracking it will make the rest of desktop think we want to push to that
+  // remote branch's upstream (which would likely be the upstream of the fork)
+  if (noTrack) {
+    args.push('--no-track')
   }
 
-  return null
+  await git(args, repository.path, 'createBranch')
 }
 
 /** Rename the given branch to a new name. */
@@ -46,8 +50,7 @@ export async function renameBranch(
 }
 
 /**
- * Delete the branch locally, see `deleteBranch` if you're looking to delete the
- * branch from the remote as well.
+ * Delete the branch locally.
  */
 export async function deleteLocalBranch(
   repository: Repository,
@@ -58,75 +61,40 @@ export async function deleteLocalBranch(
 }
 
 /**
- * Delete the branch. If the branch has a remote branch and `includeRemote` is true, it too will be
- * deleted. Silently deletes local branch if remote one is already deleted.
+ * Deletes a remote branch
+ *
+ * @param remoteName - the name of the remote to delete the branch from
+ * @param remoteBranchName - the name of the branch on the remote
  */
-export async function deleteBranch(
+export async function deleteRemoteBranch(
   repository: Repository,
-  branch: Branch,
-  account: IGitAccount | null,
-  includeRemote: boolean
+  remote: IRemote,
+  remoteBranchName: string
 ): Promise<true> {
-  if (branch.type === BranchType.Local) {
-    await deleteLocalBranch(repository, branch.name)
-  }
+  const args = [
+    ...gitNetworkArguments(),
+    'push',
+    remote.name,
+    `:${remoteBranchName}`,
+  ]
 
-  const remote = branch.remote
+  // If the user is not authenticated, the push is going to fail
+  // Let this propagate and leave it to the caller to handle
+  const result = await git(args, repository.path, 'deleteRemoteBranch', {
+    env: await envForRemoteOperation(remote.url),
+    expectedErrors: new Set<DugiteError>([DugiteError.BranchDeletionFailed]),
+  })
 
-  if (!includeRemote || !remote) {
-    return true
-  }
-
-  const branchExistsOnRemote = await checkIfBranchExistsOnRemote(
-    repository,
-    branch,
-    account,
-    remote
-  )
-
-  if (branchExistsOnRemote) {
-    const networkArguments = await gitNetworkArguments(repository, account)
-
-    const args = [
-      ...networkArguments,
-      'push',
-      remote,
-      `:${branch.nameWithoutRemote}`,
-    ]
-
-    const opts = { env: envForAuthentication(account) }
-
-    // If the user is not authenticated, the push is going to fail
-    // Let this propagate and leave it to the caller to handle
-    await git(args, repository.path, 'deleteRemoteBranch', opts)
+  // It's possible that the delete failed because the ref has already
+  // been deleted on the remote. If we identify that specific
+  // error we can safely remove our remote ref which is what would
+  // happen if the push didn't fail.
+  if (result.gitError === DugiteError.BranchDeletionFailed) {
+    const ref = `refs/remotes/${remote.name}/${remoteBranchName}`
+    await deleteRef(repository, ref)
   }
 
   return true
-}
-
-async function checkIfBranchExistsOnRemote(
-  repository: Repository,
-  branch: Branch,
-  account: IGitAccount | null,
-  remote: string
-): Promise<boolean> {
-  const networkArguments = await gitNetworkArguments(repository, account)
-
-  const args = [
-    ...networkArguments,
-    'ls-remote',
-    '--heads',
-    remote,
-    branch.nameWithoutRemote,
-  ]
-  const opts = { env: envForAuthentication(account) }
-  const result = await git(
-    args,
-    repository.path,
-    'checkRemoteBranchExistence',
-    opts
-  )
-  return result.stdout.length > 0
 }
 
 /**
@@ -153,7 +121,7 @@ export async function getBranchesPointedAt(
     {
       // - 1 is returned if a common ancestor cannot be resolved
       // - 129 is returned if ref is malformed
-      //   "warning: ignoring broken ref refs/remotes/origin/master."
+      //   "warning: ignoring broken ref refs/remotes/origin/main."
       successExitCodes: new Set([0, 1, 129]),
     }
   )
@@ -176,35 +144,21 @@ export async function getMergedBranches(
   branchName: string
 ): Promise<Map<string, string>> {
   const canonicalBranchRef = formatAsLocalRef(branchName)
+  const { formatArgs, parse } = createForEachRefParser({
+    sha: '%(objectname)',
+    canonicalRef: '%(refname)',
+  })
 
-  const args = [
-    'branch',
-    `--format=%(objectname)%00%(refname)`,
-    '--merged',
-    branchName,
-  ]
-
-  const { stdout } = await git(args, repository.path, 'mergedBranches')
-  const lines = stdout.split('\n')
-
-  // Remove the trailing newline
-  lines.splice(-1, 1)
+  const args = ['branch', ...formatArgs, '--merged', branchName]
   const mergedBranches = new Map<string, string>()
+  const { stdout } = await git(args, repository.path, 'mergedBranches')
 
-  for (const line of lines) {
-    const [sha, canonicalRef] = line.split('\0')
-
-    if (sha === undefined || canonicalRef === undefined) {
-      continue
-    }
-
+  for (const branch of parse(stdout)) {
     // Don't include the branch we're using to compare against
     // in the list of branches merged into that branch.
-    if (canonicalRef === canonicalBranchRef) {
-      continue
+    if (branch.canonicalRef !== canonicalBranchRef) {
+      mergedBranches.set(branch.canonicalRef, branch.sha)
     }
-
-    mergedBranches.set(canonicalRef, sha)
   }
 
   return mergedBranches

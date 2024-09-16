@@ -3,13 +3,9 @@ import '../lib/logging/renderer/install'
 import * as React from 'react'
 import * as ReactDOM from 'react-dom'
 import * as Path from 'path'
-
-import { ipcRenderer, remote } from 'electron'
-
 import { App } from './app'
 import {
   Dispatcher,
-  gitAuthenticationErrorHandler,
   externalEditorErrorHandler,
   openShellErrorHandler,
   mergeConflictHandler,
@@ -22,6 +18,9 @@ import {
   rebaseConflictsHandler,
   localChangesOverwrittenHandler,
   refusedWorkflowUpdate,
+  samlReauthRequired,
+  insufficientGitHubRepoPermissions,
+  discardChangesHandler,
 } from './dispatcher'
 import {
   AppStore,
@@ -35,7 +34,6 @@ import {
   PullRequestStore,
 } from '../lib/stores'
 import { GitHubUserDatabase } from '../lib/databases'
-import { URLActionType } from '../lib/parse-app-url'
 import { SelectionType, IAppState } from '../lib/app-state'
 import { StatsDatabase, StatsStore } from '../lib/stats'
 import {
@@ -47,7 +45,6 @@ import { shellNeedsPatching, updateEnvironmentForProcess } from '../lib/shell'
 import { installDevGlobals } from './install-globals'
 import { reportUncaughtException, sendErrorReport } from './main-process-proxy'
 import { getOS } from '../lib/get-os'
-import { getGUID } from '../lib/stats'
 import {
   enableSourceMaps,
   withSourceMappedStack,
@@ -56,10 +53,33 @@ import { UiActivityMonitor } from './lib/ui-activity-monitor'
 import { RepositoryStateCache } from '../lib/stores/repository-state-cache'
 import { ApiRepositoriesStore } from '../lib/stores/api-repositories-store'
 import { CommitStatusStore } from '../lib/stores/commit-status-store'
+import { PullRequestCoordinator } from '../lib/stores/pull-request-coordinator'
+
+import { sendNonFatalException } from '../lib/helpers/non-fatal-exception'
+import { enableUnhandledRejectionReporting } from '../lib/feature-flag'
+import { AheadBehindStore } from '../lib/stores/ahead-behind-store'
+import {
+  ApplicationTheme,
+  supportsSystemThemeChanges,
+} from './lib/application-theme'
+import { trampolineUIHelper } from '../lib/trampoline/trampoline-ui-helper'
+import { AliveStore } from '../lib/stores/alive-store'
+import { NotificationsStore } from '../lib/stores/notifications-store'
+import * as ipcRenderer from '../lib/ipc-renderer'
+import { migrateRendererGUID } from '../lib/get-renderer-guid'
+import { initializeRendererNotificationHandler } from '../lib/notifications/notification-handler'
+import { Grid } from 'react-virtualized'
+import { NotificationsDebugStore } from '../lib/stores/notifications-debug-store'
+import { trampolineServer } from '../lib/trampoline/trampoline-server'
+import { TrampolineCommandIdentifier } from '../lib/trampoline/trampoline-command'
+import { createAskpassTrampolineHandler } from '../lib/trampoline/trampoline-askpass-handler'
+import { createCredentialHelperTrampolineHandler } from '../lib/trampoline/trampoline-credential-helper'
 
 if (__DEV__) {
   installDevGlobals()
 }
+
+migrateRendererGUID()
 
 if (shellNeedsPatching(process)) {
   updateEnvironmentForProcess()
@@ -71,15 +91,11 @@ enableSourceMaps()
 // see https://github.com/desktop/dugite/pull/85
 process.env['LOCAL_GIT_DIRECTORY'] = Path.resolve(__dirname, 'git')
 
-// We're using a polyfill for the upcoming CSS4 `:focus-ring` pseudo-selector.
-// This allows us to not have to override default accessibility driven focus
-// styles for buttons in the case when a user clicks on a button. This also
-// gives better visiblity to individuals who navigate with the keyboard.
-//
-// See:
-//   https://github.com/WICG/focus-ring
-//   Focus Ring! -- A11ycasts #16: https://youtu.be/ilj2P5-5CjI
-require('wicg-focus-ring')
+// Ensure that dugite infers the GIT_EXEC_PATH
+// based on the LOCAL_GIT_DIRECTORY env variable
+// instead of just blindly trusting what's set in
+// the current environment. See https://git.io/JJ7KF
+delete process.env.GIT_EXEC_PATH
 
 const startTime = performance.now()
 
@@ -89,13 +105,18 @@ if (!process.env.TEST_ENV) {
   require('../../styles/desktop.scss')
 }
 
+// TODO (electron): Remove this once
+// https://bugs.chromium.org/p/chromium/issues/detail?id=1113293
+// gets fixed and propagated to electron.
+if (__DARWIN__) {
+  require('../lib/fix-emoji-spacing')
+}
+
 let currentState: IAppState | null = null
-let lastUnhandledRejection: string | null = null
-let lastUnhandledRejectionTime: Date | null = null
 
 const sendErrorWithContext = (
   error: Error,
-  context: { [key: string]: string } = {},
+  context: Record<string, string> = {},
   nonFatal?: boolean
 ) => {
   error = withSourceMappedStack(error)
@@ -109,7 +130,6 @@ const sendErrorWithContext = (
   } else {
     const extra: Record<string, string> = {
       osVersion: getOS(),
-      guid: getGUID(),
       ...context,
     }
 
@@ -127,9 +147,7 @@ const sendErrorWithContext = (
           extra.selectedState = `${currentState.selectedState.type}`
 
           if (currentState.selectedState.type === SelectionType.Repository) {
-            extra.selectedRepositorySection = `${
-              currentState.selectedState.state.selectedSection
-            }`
+            extra.selectedRepositorySection = `${currentState.selectedState.state.selectedSection}`
           }
         }
 
@@ -145,33 +163,24 @@ const sendErrorWithContext = (
           extra.windowZoomFactor = `${currentState.windowZoomFactor}`
         }
 
-        if (currentState.errors.length > 0) {
-          extra.activeAppErrors = `${currentState.errors.length}`
-        }
-
-        if (
-          lastUnhandledRejection !== null &&
-          lastUnhandledRejectionTime !== null
-        ) {
-          extra.lastUnhandledRejection = lastUnhandledRejection
-          extra.lastUnhandledRejectionTime = lastUnhandledRejectionTime.toString()
+        if (currentState.errorCount > 0) {
+          extra.activeAppErrors = `${currentState.errorCount}`
         }
 
         extra.repositoryCount = `${currentState.repositories.length}`
-        extra.windowState = currentState.windowState
+        extra.windowState = currentState.windowState ?? 'Unknown'
         extra.accounts = `${currentState.accounts.length}`
 
-        if (__DARWIN__) {
-          extra.automaticallySwitchTheme = `${
-            currentState.automaticallySwitchTheme
-          }`
-        }
+        extra.automaticallySwitchTheme = `${
+          currentState.selectedTheme === ApplicationTheme.System &&
+          supportsSystemThemeChanges()
+        }`
       }
     } catch (err) {
       /* ignore */
     }
 
-    sendErrorReport(error, extra, nonFatal)
+    sendErrorReport(error, extra, nonFatal ?? false)
   }
 }
 
@@ -189,27 +198,20 @@ process.on(
 )
 
 /**
- * Chromium won't crash on an unhandled rejection (similar to how
- * it won't crash on an unhandled error). We've taken the approach
- * that unhandled errors should crash the app and very likely we
- * should do the same thing for unhandled promise rejections but
- * that's a bit too risky to do until we've established some sense
- * of how often it happens. For now this simply stores the last
- * rejection so that we can pass it along with the crash report
- * if the app does crash. Note that this does not prevent the
- * default browser behavior of logging since we're not calling
- * `preventDefault` on the event.
+ * Chromium won't crash on an unhandled rejection (similar to how it won't crash
+ * on an unhandled error). We've taken the approach that unhandled errors should
+ * crash the app and very likely we should do the same thing for unhandled
+ * promise rejections but that's a bit too risky to do until we've established
+ * some sense of how often it happens. For now this simply stores the last
+ * rejection so that we can pass it along with the crash report if the app does
+ * crash. Note that this does not prevent the default browser behavior of
+ * logging since we're not calling `preventDefault` on the event.
  *
  * See https://developer.mozilla.org/en-US/docs/Web/API/Window/unhandledrejection_event
  */
 window.addEventListener('unhandledrejection', ev => {
-  if (ev.reason !== null && ev.reason !== undefined) {
-    try {
-      lastUnhandledRejection = `${ev.reason}`
-      lastUnhandledRejectionTime = new Date()
-    } catch (err) {
-      /* ignore */
-    }
+  if (enableUnhandledRejectionReporting() && ev.reason instanceof Error) {
+    sendNonFatalException('unhandledRejection', ev.reason)
   }
 })
 
@@ -225,6 +227,17 @@ const statsStore = new StatsStore(
 const signInStore = new SignInStore()
 
 const accountsStore = new AccountsStore(localStorage, TokenStore)
+
+trampolineServer.registerCommandHandler(
+  TrampolineCommandIdentifier.AskPass,
+  createAskpassTrampolineHandler(accountsStore)
+)
+
+trampolineServer.registerCommandHandler(
+  TrampolineCommandIdentifier.CredentialHelper,
+  createCredentialHelperTrampolineHandler(accountsStore)
+)
+
 const repositoriesStore = new RepositoriesStore(
   new RepositoriesDatabase('Database')
 )
@@ -234,13 +247,32 @@ const pullRequestStore = new PullRequestStore(
   repositoriesStore
 )
 
-const repositoryStateManager = new RepositoryStateCache(repo =>
-  gitHubUserStore.getUsersForRepository(repo)
+const pullRequestCoordinator = new PullRequestCoordinator(
+  pullRequestStore,
+  repositoriesStore
 )
+
+const repositoryStateManager = new RepositoryStateCache(statsStore)
 
 const apiRepositoriesStore = new ApiRepositoriesStore(accountsStore)
 
 const commitStatusStore = new CommitStatusStore(accountsStore)
+const aheadBehindStore = new AheadBehindStore()
+
+const aliveStore = new AliveStore(accountsStore)
+
+const notificationsStore = new NotificationsStore(
+  accountsStore,
+  aliveStore,
+  pullRequestCoordinator,
+  statsStore
+)
+
+const notificationsDebugStore = new NotificationsDebugStore(
+  accountsStore,
+  notificationsStore,
+  pullRequestCoordinator
+)
 
 const appStore = new AppStore(
   gitHubUserStore,
@@ -250,9 +282,10 @@ const appStore = new AppStore(
   signInStore,
   accountsStore,
   repositoriesStore,
-  pullRequestStore,
+  pullRequestCoordinator,
   repositoryStateManager,
-  apiRepositoriesStore
+  apiRepositoriesStore,
+  notificationsStore
 )
 
 appStore.onDidUpdate(state => {
@@ -272,17 +305,24 @@ dispatcher.registerErrorHandler(externalEditorErrorHandler)
 dispatcher.registerErrorHandler(openShellErrorHandler)
 dispatcher.registerErrorHandler(mergeConflictHandler)
 dispatcher.registerErrorHandler(lfsAttributeMismatchHandler)
-dispatcher.registerErrorHandler(gitAuthenticationErrorHandler)
+dispatcher.registerErrorHandler(insufficientGitHubRepoPermissions)
 dispatcher.registerErrorHandler(pushNeedsPullHandler)
+dispatcher.registerErrorHandler(samlReauthRequired)
 dispatcher.registerErrorHandler(backgroundTaskHandler)
 dispatcher.registerErrorHandler(missingRepositoryHandler)
 dispatcher.registerErrorHandler(localChangesOverwrittenHandler)
 dispatcher.registerErrorHandler(rebaseConflictsHandler)
 dispatcher.registerErrorHandler(refusedWorkflowUpdate)
+dispatcher.registerErrorHandler(discardChangesHandler)
 
 document.body.classList.add(`platform-${process.platform}`)
 
-dispatcher.setAppFocusState(remote.getCurrentWindow().isFocused())
+dispatcher.initializeAppFocusState()
+
+initializeRendererNotificationHandler(notificationsStore)
+
+// The trampoline UI helper needs a reference to the dispatcher before it's used
+trampolineUIHelper.setDispatcher(dispatcher)
 
 ipcRenderer.on('focus', () => {
   const { selectedState } = appStore.getState()
@@ -307,12 +347,32 @@ ipcRenderer.on('blur', () => {
   dispatcher.setAppFocusState(false)
 })
 
-ipcRenderer.on(
-  'url-action',
-  (event: Electron.IpcMessageEvent, { action }: { action: URLActionType }) => {
-    dispatcher.dispatchURLAction(action)
-  }
+ipcRenderer.on('url-action', (_, action) =>
+  dispatcher.dispatchURLAction(action)
 )
+
+// react-virtualized will use the literal string "grid" as the 'aria-label'
+// attribute unless we override it. This is a problem because aria-label should
+// not be set unless there's a compelling reason for it[1].
+//
+// Similarly the default props call for the 'aria-readonly' attribute to be set
+// to true which according to MDN doesn't fit our use case[2]:
+//
+// > This indicates to the user that an interactive element that would normally
+// > be focusable and copyable has been placed in a read-only (not disabled)
+// > state.
+//
+// 1. https://developer.mozilla.org/en-US/docs/Web/Accessibility/ARIA/Attributes/aria-label
+// 2. https://developer.mozilla.org/en-US/docs/Web/Accessibility/ARIA/Attributes/aria-readonly
+;(function (
+  defaults: Record<string, unknown> | undefined,
+  types: Record<string, unknown> | undefined
+) {
+  ;['aria-label', 'aria-readonly'].forEach(k => {
+    delete defaults?.[k]
+    delete types?.[k]
+  })
+})(Grid.defaultProps, Grid.propTypes)
 
 ReactDOM.render(
   <App
@@ -321,6 +381,8 @@ ReactDOM.render(
     repositoryStateManager={repositoryStateManager}
     issuesStore={issuesStore}
     gitHubUserStore={gitHubUserStore}
+    aheadBehindStore={aheadBehindStore}
+    notificationsDebugStore={notificationsDebugStore}
     startTime={startTime}
   />,
   document.getElementById('desktop-app-container')!

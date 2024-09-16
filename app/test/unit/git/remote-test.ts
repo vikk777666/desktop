@@ -3,6 +3,7 @@ import {
   getRemotes,
   addRemote,
   removeRemote,
+  setRemoteURL,
 } from '../../../src/lib/git/remote'
 import {
   setupFixtureRepository,
@@ -11,6 +12,7 @@ import {
 } from '../../helpers/repositories'
 import { findDefaultRemote } from '../../../src/lib/stores/helpers/find-default-remote'
 import { GitProcess } from 'dugite'
+import { setConfigValue } from '../../../src/lib/git'
 
 describe('git/remote', () => {
   describe('getRemotes', () => {
@@ -19,6 +21,7 @@ describe('git/remote', () => {
         'repo-with-multiple-remotes'
       )
       const repository = new Repository(testRepoPath, -1, null, false)
+      await addRemote(repository, 'spaces-in-path', '/path/with spaces/foo')
 
       // NB: We don't check for exact URL equality because CircleCI's git config
       // rewrites HTTPS URLs to SSH.
@@ -26,11 +29,18 @@ describe('git/remote', () => {
 
       const result = await getRemotes(repository)
 
+      // Changes the output of git remote -v, see
+      // https://github.com/git/git/blob/9005149a4a77e2d3409c6127bf4fd1a0893c3495/builtin/remote.c#L1223-L1226
+      setConfigValue(repository, 'remote.bassoon.partialclonefilter', 'foo')
+
       expect(result[0].name).toEqual('bassoon')
       expect(result[0].url.endsWith(nwo)).toEqual(true)
 
       expect(result[1].name).toEqual('origin')
       expect(result[1].url.endsWith(nwo)).toEqual(true)
+
+      expect(result[2].name).toEqual('spaces-in-path')
+      expect(result[2].url).toEqual('/path/with spaces/foo')
     })
 
     it('returns remotes sorted alphabetically', async () => {
@@ -59,6 +69,32 @@ describe('git/remote', () => {
       const repository = setupEmptyDirectory()
       const remotes = await getRemotes(repository)
       expect(remotes).toHaveLength(0)
+    })
+
+    it('returns promisor remote', async () => {
+      const repository = await setupEmptyRepository()
+
+      // Add a remote
+      const url = 'https://github.com/desktop/not-found.git'
+      await GitProcess.exec(
+        ['remote', 'add', 'hasBlobFilter', url],
+        repository.path
+      )
+
+      // Fetch a remote and add a filter
+      await GitProcess.exec(['fetch', '--filter=blob:none'], repository.path)
+
+      // Shows that the new remote does have a filter
+      const rawGetRemote = await GitProcess.exec(
+        ['remote', '-v'],
+        repository.path
+      )
+      expect(rawGetRemote.stdout).toContain(url + ' (fetch) [blob:none]')
+
+      // Shows that the `getRemote` returns that remote
+      const result = await getRemotes(repository)
+      expect(result).toHaveLength(1)
+      expect(result[0].name).toEqual('hasBlobFilter')
     })
   })
 
@@ -123,6 +159,32 @@ describe('git/remote', () => {
     it('silently fails when remote not defined', async () => {
       const repository = await setupEmptyRepository()
       expect(removeRemote(repository, 'origin')).resolves.not.toThrow()
+    })
+  })
+
+  describe('setRemoteURL', () => {
+    let repository: Repository
+    const remoteName = 'origin'
+    const remoteUrl = 'https://fakeweb.com/owner/name'
+    const newUrl = 'https://github.com/desktop/desktop'
+
+    beforeEach(async () => {
+      repository = await setupEmptyRepository()
+      await addRemote(repository, remoteName, remoteUrl)
+    })
+    it('can set the url for an existing remote', async () => {
+      expect(await setRemoteURL(repository, remoteName, newUrl)).toBeTrue()
+
+      const remotes = await getRemotes(repository)
+      expect(remotes).toHaveLength(1)
+      expect(remotes[0].url).toEqual(newUrl)
+    })
+    it('returns false for unknown remote name', async () => {
+      expect(setRemoteURL(repository, 'none', newUrl)).rejects.toThrow()
+
+      const remotes = await getRemotes(repository)
+      expect(remotes).toHaveLength(1)
+      expect(remotes[0].url).toEqual(remoteUrl)
     })
   })
 })

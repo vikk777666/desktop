@@ -1,7 +1,6 @@
 import { Disposable } from 'event-kit'
 import { Account } from '../../models/account'
 import { assertNever, fatalError } from '../fatal-error'
-import { askUserToOAuth } from '../../lib/oauth'
 import {
   validateURL,
   InvalidURLErrorName,
@@ -17,22 +16,30 @@ import {
   getDotComAPIEndpoint,
   getEnterpriseAPIURL,
   fetchMetadata,
+  requestOAuthToken,
+  getOAuthAuthorizationURL,
 } from '../../lib/api'
 
 import { AuthenticationMode } from '../../lib/2fa'
 
 import { minimumSupportedEnterpriseVersion } from '../../lib/enterprise'
 import { TypedBaseStore } from './base-store'
+import { timeout } from '../promise'
+import uuid from 'uuid'
+import { IOAuthAction } from '../parse-app-url'
+import { shell } from '../app-shell'
+import { noop } from 'lodash'
+import { isDotCom, isGHE } from '../endpoint-capabilities'
 
 function getUnverifiedUserErrorMessage(login: string): string {
   return `Unable to authenticate. The account ${login} is lacking a verified email address. Please sign in to GitHub.com, confirm your email address in the Emails section under Personal settings, and try again.`
 }
 
-const EnterpriseTooOldMessage = `The GitHub Enterprise Server version does not support GitHub Desktop. Talk to your server's administrator about upgrading to the latest version of GitHub Enterprise Server.`
+const EnterpriseTooOldMessage = `The GitHub Enterprise version does not support GitHub Desktop. Talk to your server's administrator about upgrading to the latest version of GitHub Enterprise.`
 
 /**
  * An enumeration of the possible steps that the sign in
- * store can be in save for the unitialized state (null).
+ * store can be in save for the uninitialized state (null).
  */
 export enum SignInStep {
   EndpointEntry = 'EndpointEntry',
@@ -43,7 +50,7 @@ export enum SignInStep {
 
 /**
  * The union type of all possible states that the sign in
- * store can be in save the unitialized state (null).
+ * store can be in save the uninitialized state (null).
  */
 export type SignInState =
   | IEndpointEntryState
@@ -75,15 +82,18 @@ export interface ISignInState {
    * sign in process is ongoing.
    */
   readonly loading: boolean
+
+  readonly resultCallback: (result: SignInResult) => void
 }
 
 /**
  * State interface representing the endpoint entry step.
- * This is the initial step in the Enterprise Server sign in
+ * This is the initial step in the Enterprise sign in
  * flow and is not present when signing in to GitHub.com
  */
 export interface IEndpointEntryState extends ISignInState {
   readonly kind: SignInStep.EndpointEntry
+  readonly resultCallback: (result: SignInResult) => void
 }
 
 /**
@@ -91,7 +101,7 @@ export interface IEndpointEntryState extends ISignInState {
  * the user provides credentials and/or initiates a browser
  * OAuth sign in process. This step occurs as the first step
  * when signing in to GitHub.com and as the second step when
- * signing in to a GitHub Enterprise Server instance.
+ * signing in to a GitHub Enterprise instance.
  */
 export interface IAuthenticationState extends ISignInState {
   readonly kind: SignInStep.Authentication
@@ -100,7 +110,7 @@ export interface IAuthenticationState extends ISignInState {
    * The URL to the host which we're currently authenticating
    * against. This will be either https://api.github.com when
    * signing in against GitHub.com or a user-specified
-   * URL when signing in against a GitHub Enterprise Server
+   * URL when signing in against a GitHub Enterprise
    * instance.
    */
   readonly endpoint: string
@@ -108,7 +118,7 @@ export interface IAuthenticationState extends ISignInState {
   /**
    * A value indicating whether or not the endpoint supports
    * basic authentication (i.e. username and password). All
-   * GitHub Enterprise Server instances support OAuth (or web
+   * GitHub Enterprise instances support OAuth (or web
    * flow sign-in).
    */
   readonly supportsBasicAuth: boolean
@@ -117,13 +127,21 @@ export interface IAuthenticationState extends ISignInState {
    * The endpoint-specific URL for resetting credentials.
    */
   readonly forgotPasswordUrl: string
+  readonly resultCallback: (result: SignInResult) => void
+
+  readonly oauthState?: {
+    state: string
+    endpoint: string
+    onAuthCompleted: (account: Account) => void
+    onAuthError: (error: Error) => void
+  }
 }
 
 /**
  * State interface representing the TwoFactorAuthentication
  * step where the user provides an OTP token. This step
  * occurs after the authentication step both for GitHub.com,
- * and GitHub Enterprise Server when the user has enabled two
+ * and GitHub Enterprise when the user has enabled two
  * factor authentication on the host.
  */
 export interface ITwoFactorAuthenticationState extends ISignInState {
@@ -133,19 +151,19 @@ export interface ITwoFactorAuthenticationState extends ISignInState {
    * The URL to the host which we're currently authenticating
    * against. This will be either https://api.github.com when
    * signing in against GitHub.com or a user-specified
-   * URL when signing in against a GitHub Enterprise Server
+   * URL when signing in against a GitHub Enterprise
    * instance.
    */
   readonly endpoint: string
 
   /**
-   * The username specified by the user in the preceeding
+   * The username specified by the user in the preceding
    * Authentication step
    */
   readonly username: string
 
   /**
-   * The password specified by the user in the preceeding
+   * The password specified by the user in the preceding
    * Authentication step
    */
   readonly password: string
@@ -154,6 +172,7 @@ export interface ITwoFactorAuthenticationState extends ISignInState {
    * The 2FA type expected by the GitHub endpoint.
    */
   readonly type: AuthenticationMode
+  readonly resultCallback: (result: SignInResult) => void
 }
 
 /**
@@ -164,6 +183,7 @@ export interface ITwoFactorAuthenticationState extends ISignInState {
  */
 export interface ISuccessState {
   readonly kind: SignInStep.Success
+  readonly resultCallback: (result: SignInResult) => void
 }
 
 /**
@@ -187,16 +207,30 @@ interface IAuthenticationEvent {
   readonly method: SignInMethod
 }
 
+export type SignInResult =
+  | { kind: 'success'; account: Account; method: SignInMethod }
+  | { kind: 'cancelled' }
+
+/** The maximum time to wait for a `/meta` API call in milliseconds */
+const ServerMetaDataTimeout = 2000
+
 /**
  * A store encapsulating all logic related to signing in a user
- * to GitHub.com, or a GitHub Enterprise Server instance.
+ * to GitHub.com, or a GitHub Enterprise instance.
  */
 export class SignInStore extends TypedBaseStore<SignInState | null> {
   private state: SignInState | null = null
+  /**
+   * A map keyed on an endpoint url containing the last known
+   * value of the verifiable_password_authentication meta property
+   * for that endpoint.
+   */
+  private endpointSupportBasicAuth = new Map<string, boolean>()
 
   private emitAuthenticate(account: Account, method: SignInMethod) {
     const event: IAuthenticationEvent = { account, method }
     this.emitter.emit('did-authenticate', event)
+    this.state?.resultCallback({ kind: 'success', account, method })
   }
 
   /**
@@ -232,19 +266,37 @@ export class SignInStore extends TypedBaseStore<SignInState | null> {
   }
 
   private async endpointSupportsBasicAuth(endpoint: string): Promise<boolean> {
-    const response = await fetchMetadata(endpoint)
-
-    if (response) {
-      if (response.verifiable_password_authentication === false) {
-        return false
-      } else {
-        return true
-      }
-    } else {
-      throw new Error(
-        `Unable to authenticate with the GitHub Enterprise Server instance. Verify that the URL is correct, that your GitHub Enterprise Server instance is running version ${minimumSupportedEnterpriseVersion} or later, that you have an internet connection and try again.`
-      )
+    if (isDotCom(endpoint) || isGHE(endpoint)) {
+      return false
     }
+
+    if (isGHE(endpoint)) {
+      return false
+    }
+
+    const cached = this.endpointSupportBasicAuth.get(endpoint)
+    const fallbackValue =
+      cached === undefined
+        ? null
+        : { verifiable_password_authentication: cached }
+
+    const response = await timeout(
+      fetchMetadata(endpoint),
+      ServerMetaDataTimeout,
+      fallbackValue
+    )
+
+    if (response !== null) {
+      const supportsBasicAuth =
+        response.verifiable_password_authentication === true
+      this.endpointSupportBasicAuth.set(endpoint, supportsBasicAuth)
+
+      return supportsBasicAuth
+    }
+
+    throw new Error(
+      `Unable to authenticate with the GitHub Enterprise instance. Verify that the URL is correct, that your GitHub Enterprise instance is running version ${minimumSupportedEnterpriseVersion} or later, that you have an internet connection and try again.`
+    )
   }
 
   private getForgotPasswordURL(endpoint: string): string {
@@ -256,24 +308,54 @@ export class SignInStore extends TypedBaseStore<SignInState | null> {
    * initial (no sign-in) state.
    */
   public reset() {
+    const currentState = this.state
+    this.state?.resultCallback({ kind: 'cancelled' })
     this.setState(null)
+
+    if (currentState?.kind === SignInStep.Authentication) {
+      currentState.oauthState?.onAuthError(new Error('cancelled'))
+    }
   }
 
   /**
    * Initiate a sign in flow for github.com. This will put the store
    * in the Authentication step ready to receive user credentials.
    */
-  public beginDotComSignIn() {
+  public beginDotComSignIn(resultCallback?: (result: SignInResult) => void) {
     const endpoint = getDotComAPIEndpoint()
+
+    if (this.state !== null) {
+      this.reset()
+    }
 
     this.setState({
       kind: SignInStep.Authentication,
       endpoint,
-      supportsBasicAuth: true,
+      supportsBasicAuth: false,
       error: null,
       loading: false,
       forgotPasswordUrl: this.getForgotPasswordURL(endpoint),
+      resultCallback: resultCallback ?? noop,
     })
+
+    // Asynchronously refresh our knowledge about whether GitHub.com
+    // support username and password authentication or not.
+    this.endpointSupportsBasicAuth(endpoint)
+      .then(supportsBasicAuth => {
+        if (
+          this.state !== null &&
+          this.state.kind === SignInStep.Authentication &&
+          this.state.endpoint === endpoint
+        ) {
+          this.setState({ ...this.state, supportsBasicAuth })
+        }
+      })
+      .catch(err =>
+        log.error(
+          'Failed resolving whether GitHub.com supports password authentication',
+          err
+        )
+      )
   }
 
   /**
@@ -328,7 +410,10 @@ export class SignInStore extends TypedBaseStore<SignInState | null> {
       }
 
       this.emitAuthenticate(user, SignInMethod.Basic)
-      this.setState({ kind: SignInStep.Success })
+      this.setState({
+        kind: SignInStep.Success,
+        resultCallback: this.state.resultCallback,
+      })
     } else if (
       response.kind ===
       AuthorizationResponseKind.TwoFactorAuthenticationRequired
@@ -341,14 +426,13 @@ export class SignInStore extends TypedBaseStore<SignInState | null> {
         type: response.type,
         error: null,
         loading: false,
+        resultCallback: this.state.resultCallback,
       })
     } else {
       if (response.kind === AuthorizationResponseKind.Error) {
         this.emitError(
           new Error(
-            `The server responded with an error while attempting to authenticate (${
-              response.response.status
-            })\n\n${response.response.statusText}`
+            `The server responded with an error while attempting to authenticate (${response.response.status})\n\n${response.response.statusText}`
           )
         )
         this.setState({ ...currentState, loading: false })
@@ -407,14 +491,8 @@ export class SignInStore extends TypedBaseStore<SignInState | null> {
    * Initiate an OAuth sign in using the system configured browser.
    * This method must only be called when the store is in the authentication
    * step or an error will be thrown.
-   *
-   * The promise returned will only resolve once the user has successfully
-   * authenticated. If the user terminates the sign-in process by closing
-   * their browser before the protocol handler is invoked, by denying the
-   * protocol handler to execute or by providing the wrong credentials
-   * this promise will never complete.
    */
-  public async authenticateWithBrowser(): Promise<void> {
+  public authenticateWithBrowser() {
     const currentState = this.state
 
     if (!currentState || currentState.kind !== SignInStep.Authentication) {
@@ -426,36 +504,95 @@ export class SignInStore extends TypedBaseStore<SignInState | null> {
 
     this.setState({ ...currentState, loading: true })
 
-    let account: Account
-    try {
+    const csrfToken = uuid()
+
+    new Promise<Account>((resolve, reject) => {
+      const { endpoint } = currentState
       log.info('[SignInStore] initializing OAuth flow')
-      account = await askUserToOAuth(currentState.endpoint)
+      this.setState({
+        ...currentState,
+        oauthState: {
+          state: csrfToken,
+          endpoint,
+          onAuthCompleted: resolve,
+          onAuthError: reject,
+        },
+      })
+      shell.openExternal(getOAuthAuthorizationURL(endpoint, csrfToken))
       log.info('[SignInStore] account resolved')
-    } catch (e) {
-      log.info('[SignInStore] error with OAuth flow', e)
-      this.setState({ ...currentState, error: e, loading: false })
-      return
-    }
+    })
+      .then(account => {
+        if (!this.state || this.state.kind !== SignInStep.Authentication) {
+          // Looks like the sign in flow has been aborted
+          return
+        }
 
+        this.emitAuthenticate(account, SignInMethod.Web)
+        this.setState({
+          kind: SignInStep.Success,
+          resultCallback: this.state.resultCallback,
+        })
+      })
+      .catch(e => {
+        // Make sure we're still in the same sign in session
+        if (
+          this.state?.kind === SignInStep.Authentication &&
+          this.state.oauthState?.state === csrfToken
+        ) {
+          log.info('[SignInStore] error with OAuth flow', e)
+          this.setState({ ...this.state, error: e, loading: false })
+        } else {
+          log.info(`[SignInStore] OAuth error but session has changed: ${e}`)
+        }
+      })
+  }
+
+  public async resolveOAuthRequest(action: IOAuthAction) {
     if (!this.state || this.state.kind !== SignInStep.Authentication) {
-      // Looks like the sign in flow has been aborted
       return
     }
 
-    this.emitAuthenticate(account, SignInMethod.Web)
-    this.setState({ kind: SignInStep.Success })
+    if (!this.state.oauthState) {
+      return
+    }
+
+    if (this.state.oauthState.state !== action.state) {
+      log.warn(
+        'requestAuthenticatedUser was not called with valid OAuth state. This is likely due to a browser reloading the callback URL. Contact GitHub Support if you believe this is an error'
+      )
+      return
+    }
+
+    const { endpoint } = this.state
+    const token = await requestOAuthToken(endpoint, action.code)
+
+    if (token) {
+      const account = await fetchUser(endpoint, token)
+      this.state.oauthState.onAuthCompleted(account)
+    } else {
+      this.state.oauthState.onAuthError(
+        new Error('Failed retrieving authenticated user')
+      )
+    }
   }
 
   /**
-   * Initiate a sign in flow for a GitHub Enterprise Server instance.
+   * Initiate a sign in flow for a GitHub Enterprise instance.
    * This will put the store in the EndpointEntry step ready to
    * receive the url to the enterprise instance.
    */
-  public beginEnterpriseSignIn() {
+  public beginEnterpriseSignIn(
+    resultCallback?: (result: SignInResult) => void
+  ) {
+    if (this.state !== null) {
+      this.reset()
+    }
+
     this.setState({
       kind: SignInStep.EndpointEntry,
       error: null,
       loading: false,
+      resultCallback: resultCallback ?? noop,
     })
   }
 
@@ -491,11 +628,11 @@ export class SignInStore extends TypedBaseStore<SignInState | null> {
       let error = e
       if (e.name === InvalidURLErrorName) {
         error = new Error(
-          `The GitHub Enterprise Server instance address doesn't appear to be a valid URL. We're expecting something like https://github.example.com.`
+          `The GitHub Enterprise instance address doesn't appear to be a valid URL. We're expecting something like https://github.example.com.`
         )
       } else if (e.name === InvalidProtocolErrorName) {
         error = new Error(
-          'Unsupported protocol. Only http or https is supported when authenticating with GitHub Enterprise Server instances.'
+          'Unsupported protocol. Only http or https is supported when authenticating with GitHub Enterprise instances.'
         )
       }
 
@@ -519,6 +656,7 @@ export class SignInStore extends TypedBaseStore<SignInState | null> {
         error: null,
         loading: false,
         forgotPasswordUrl: this.getForgotPasswordURL(endpoint),
+        resultCallback: this.state.resultCallback,
       })
     } catch (e) {
       let error = e
@@ -556,7 +694,6 @@ export class SignInStore extends TypedBaseStore<SignInState | null> {
       fatalError(
         `Sign in step '${stepText}' not compatible with two factor authentication`
       )
-      return
     }
 
     this.setState({ ...currentState, loading: true })
@@ -593,7 +730,10 @@ export class SignInStore extends TypedBaseStore<SignInState | null> {
       }
 
       this.emitAuthenticate(user, SignInMethod.Basic)
-      this.setState({ kind: SignInStep.Success })
+      this.setState({
+        kind: SignInStep.Success,
+        resultCallback: this.state.resultCallback,
+      })
     } else {
       switch (response.kind) {
         case AuthorizationResponseKind.Failed:
@@ -607,9 +747,7 @@ export class SignInStore extends TypedBaseStore<SignInState | null> {
         case AuthorizationResponseKind.Error:
           this.emitError(
             new Error(
-              `The server responded with an error (${
-                response.response.status
-              })\n\n${response.response.statusText}`
+              `The server responded with an error (${response.response.status})\n\n${response.response.statusText}`
             )
           )
           break
